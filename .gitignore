@@ -1,14 +1,28 @@
-# Ignore Visual Studio files
-.vscode/
-*.sln
-*.vcxproj
-*.vcxproj.*
+# Visual Studio user-specific files
+*.suo
 *.user
-*.obj
-*.exe
-*.log
-*.pdb
-ipch/
-*.tlog/
-Debug/
-Release/
+*.userosscache
+*.sln.docstates
+
+# VS Code workspace settings
+.vscode/
+
+# Visual Studio working directories
+.vs/
+*.vcxproj*
+*.sln
+*.db
+*.opendb
+*.json
+*.sqlite
+*.wsuo
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+build/
+
+# Backup and layout
+*Layout*.json
+*.backup.json
