@@ -17,17 +17,25 @@ void displayHeader() {
 
 int main() {
     string command;
-    
+
     // Display initial messages
     displayHeader();
     cout << "Hello, Welcome to AJEL OS command.net" << endl;
     cout << "Type \"exit\" to quit, \"clear\" to clear the screen" << endl;
-    
-    // Main command loop
-    //while (true) {
-        cout << "\nEnter a command: ";
 
-    //}
-    
+    // Main command loop
+    while (true) {
+        cout << "\nEnter a command: ";
+        getline(cin, command);
+
+        if (command == "exit") {
+            cout << "exit command recognized. Exiting application." << endl;
+            break; // Exit the loop and end the program
+        }
+        else {
+            cout << command << " command recognized. Doing something." << endl;
+        }
+    }
+
     return 0;
 }
