@@ -1,0 +1,14 @@
+# Ignore Visual Studio files
+.vscode/
+*.sln
+*.vcxproj
+*.vcxproj.*
+*.user
+*.obj
+*.exe
+*.log
+*.pdb
+ipch/
+*.tlog/
+Debug/
+Release/
