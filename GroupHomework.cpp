@@ -32,6 +32,12 @@ int main() {
             cout << "exit command recognized. Exiting application." << endl;
             break; // Exit the loop and end the program
         }
+        if(command == "clear") { // clears screen & displays header
+            system("cls");
+            displayHeader();
+            cout << "Hello, Welcome to AJEL OS command.net" << endl;
+            cout << "Type \"exit\" to quit, \"clear\" to clear the screen" << endl;
+        }
         else {
             cout << command << " command recognized. Doing something." << endl;
         }
