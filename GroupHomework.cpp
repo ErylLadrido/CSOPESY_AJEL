@@ -15,6 +15,13 @@ void displayHeader() {
 )" << endl;
 }
 
+void showCommands() {
+    cout << "\nAvailable commands:\n";
+    cout << "  help   - Show available commands\n";
+    cout << "  clear  - Clear the screen\n";
+    cout << "  exit   - Exit the program\n";
+}
+
 int main() {
     string command;
 
