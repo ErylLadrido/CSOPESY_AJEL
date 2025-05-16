@@ -14,14 +14,14 @@ void displayHeader() {
 \____|____/ \________| /_________/ |________\  \_________/ /_________/
 )" << endl;
 }
-
+/*
 void showCommands() {
     cout << "\nAvailable commands:\n";
     cout << "  help   - Show available commands\n";
     cout << "  clear  - Clear the screen\n";
     cout << "  exit   - Exit the program\n";
 }
-
+*/
 int main() {
     string command;
 
@@ -39,14 +39,29 @@ int main() {
             cout << "exit command recognized. Exiting application." << endl;
             break; // Exit the loop and end the program
         }
-        if(command == "clear") { // clears screen & displays header
+        else if(command == "clear") { // clears screen & displays header
             system("cls");
             displayHeader();
             cout << "Hello, Welcome to AJEL OS command.net" << endl;
             cout << "Type \"exit\" to quit, \"clear\" to clear the screen" << endl;
         }
+        else if (command == "initialize") {
+            cout << "initialize command recognized. Doing something." << endl;
+        }
+        else if (command == "screen") {
+            cout << "screen command recognized. Doing something." << endl;
+        }
+        else if (command == "scheduler-test") {
+            cout << "scheduler-test command recognized. Doing something." << endl;
+        }
+        else if (command == "scheduler-stop") {
+            cout << "scheduler-stop command recognized. Doing something." << endl;
+        }
+        else if (command == "report-util") {
+            cout << "report-util command recognized. Doing something." << endl;
+        }
         else {
-            cout << command << " command recognized. Doing something." << endl;
+            cout << "Command not recognized." << endl;
         }
     }
 
