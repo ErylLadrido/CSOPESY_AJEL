@@ -1,8 +1,48 @@
 #include <iostream>
 #include <string>
-#include <cstdlib> // For system("clear") or system("cls")
+#include <unordered_map>
+#include <ctime>
+#include <iomanip>  // For put_time
+#include <sstream>  // For stringstream
+#include <cstdlib>  // For system("clear") or system("cls")
 
 using namespace std;
+
+class Screen {
+public:
+    string name;
+    int currentLine;
+    int totalLines;
+    string timestamp;
+
+    // Constructor for screen
+    Screen(const string& name, int totalLines = 100)
+        : name(name), currentLine(1), totalLines(totalLines) {
+        // Get current time
+        time_t now = time(0);
+        tm localtm;
+
+        // Use localtime_s for safety (MSVC)
+        localtime_s(&localtm, &now);
+
+        stringstream ss;
+        ss << put_time(&localtm, "%m/%d/%Y, %I:%M:%S %p");
+        timestamp = ss.str();
+    }
+
+    // Display function
+    void display() const {
+        system("cls");  // or use "clear" if you're on Linux/Mac
+        //Display process name, instruction line number, and timestamp
+        cout << "+Insert display here+\n";
+    }
+
+    // Progress number in instruction line
+    void advance() {
+        if (currentLine < totalLines)
+            currentLine++;
+    }
+};
 
 // Function to display the CSOPESY ASCII header
 void displayHeader() {
@@ -14,16 +54,10 @@ void displayHeader() {
 \____|____/ \________| /_________/ |________\  \_________/ /_________/
 )" << endl;
 }
-/*
-void showCommands() {
-    cout << "\nAvailable commands:\n";
-    cout << "  help   - Show available commands\n";
-    cout << "  clear  - Clear the screen\n";
-    cout << "  exit   - Exit the program\n";
-}
-*/
+
 int main() {
     string command;
+    unordered_map<string, Screen> screens;
 
     // Display initial messages
     displayHeader();
@@ -37,9 +71,9 @@ int main() {
 
         if (command == "exit") {
             cout << "exit command recognized. Exiting application." << endl;
-            break; // Exit the loop and end the program
+            break;
         }
-        else if(command == "clear") { // clears screen & displays header
+        else if (command == "clear") {
             system("cls");
             displayHeader();
             cout << "Hello, Welcome to AJEL OS command.net" << endl;
