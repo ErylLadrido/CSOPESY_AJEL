@@ -1,10 +1,18 @@
 #include <iostream>
 #include <string>
+<<<<<<< HEAD
 #include <cstdlib> // For system("clear") or system("cls")
 #include <map>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+=======
+#include <unordered_map>
+#include <ctime>
+#include <iomanip>  // For put_time
+#include <sstream>  // For stringstream
+#include <cstdlib>  // For system("clear") or system("cls")
+>>>>>>> 19be02ec7e4b51382839d78c731bd73e3ced6eac
 
 using namespace std;
 
@@ -15,6 +23,7 @@ public:
     int totalLines;
     string timestamp;
 
+<<<<<<< HEAD
     Screen(string n) {
         name = n;
         currentLine = 1;
@@ -41,6 +50,61 @@ private:
 };
 
 
+=======
+    // Constructor for screen
+    Screen(const string& name, int totalLines = 100)
+        : name(name), currentLine(1), totalLines(totalLines) {
+        // Get current time
+        time_t now = time(0);
+        tm localtm;
+
+        // Use localtime_s for safety (MSVC)
+        localtime_s(&localtm, &now);
+
+        stringstream ss;
+        ss << put_time(&localtm, "%m/%d/%Y, %I:%M:%S %p");
+        timestamp = ss.str();
+    }
+
+    // Display function
+    void display() const {
+        system("cls");  // or use "clear" if you're on Linux/Mac
+        
+        // Display header
+        displayHeader();
+        
+        // Display screen information
+        cout << "┌──────────────────────────────────────────────────────────────┐\n";
+        cout << "│ Process: " << left << setw(52) << name.substr(0, 52) << "│\n";
+        cout << "├──────────────────────────────────────────────────────────────┤\n";
+        cout << "│ Current Instruction Line: " << setw(6) << currentLine 
+             << " of " << setw(6) << totalLines 
+             << " (" << setw(3) << (currentLine * 100 / totalLines) << "%)       │\n";
+        cout << "├──────────────────────────────────────────────────────────────┤\n";
+        cout << "│ Timestamp: " << left << setw(53) << timestamp << "│\n";
+        cout << "└──────────────────────────────────────────────────────────────┘\n";
+        
+        // Display progress bar
+        cout << "\nProgress:\n";
+        cout << "[";
+        int progressWidth = 50;
+        int pos = progressWidth * currentLine / totalLines;
+        for (int i = 0; i < progressWidth; ++i) {
+            if (i < pos) cout << "=";
+            else if (i == pos) cout << ">";
+            else cout << " ";
+        }
+        cout << "] " << (currentLine * 100 / totalLines) << "%\n";
+    }
+
+    // Progress number in instruction line
+    void advance() {
+        if (currentLine < totalLines)
+            currentLine++;
+    }
+};
+
+>>>>>>> 19be02ec7e4b51382839d78c731bd73e3ced6eac
 // Function to display the CSOPESY ASCII header
 void displayHeader() {
     cout << R"(
@@ -52,6 +116,7 @@ void displayHeader() {
 )" << endl;
 }
 
+<<<<<<< HEAD
 void showCommands() {
     cout << "\nAvailable commands:\n";
     cout << "  help   - Show available commands\n";
@@ -67,6 +132,11 @@ int main() {
     bool inScreen = false;
     string currentScreen = "";
 
+=======
+int main() {
+    string command;
+    unordered_map<string, Screen> screens;
+>>>>>>> 19be02ec7e4b51382839d78c731bd73e3ced6eac
 
     // Display initial messages
     displayHeader();
@@ -93,14 +163,15 @@ int main() {
 
         if (command == "exit") {
             cout << "exit command recognized. Exiting application." << endl;
-            break; // Exit the loop and end the program
+            break;
         }
-        if(command == "clear") { // clears screen & displays header
+        else if (command == "clear") {
             system("cls");
             displayHeader();
             cout << "Hello, Welcome to AJEL OS command.net" << endl;
             cout << "Type \"exit\" to quit, \"clear\" to clear the screen" << endl;
         }
+<<<<<<< HEAD
         else if (command.substr(0, 9) == "screen -r") {
             string name = command.substr(10);
             if (screens.find(name) != screens.end()) {
@@ -119,9 +190,25 @@ int main() {
             } else {
                 cout << "Screen '" << name << "' already exists." << endl;
             }
+=======
+        else if (command == "initialize") {
+            cout << "initialize command recognized. Doing something." << endl;
+        }
+        else if (command == "screen") {
+            cout << "screen command recognized. Doing something." << endl;
+        }
+        else if (command == "scheduler-test") {
+            cout << "scheduler-test command recognized. Doing something." << endl;
+        }
+        else if (command == "scheduler-stop") {
+            cout << "scheduler-stop command recognized. Doing something." << endl;
+        }
+        else if (command == "report-util") {
+            cout << "report-util command recognized. Doing something." << endl;
+>>>>>>> 19be02ec7e4b51382839d78c731bd73e3ced6eac
         }
         else {
-            cout << command << " command recognized. Doing something." << endl;
+            cout << "Command not recognized." << endl;
         }
     }
 
