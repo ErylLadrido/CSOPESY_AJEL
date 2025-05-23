@@ -33,8 +33,32 @@ public:
     // Display function
     void display() const {
         system("cls");  // or use "clear" if you're on Linux/Mac
-        //Display process name, instruction line number, and timestamp
-        cout << "+Insert display here+\n";
+        
+        // Display header
+        displayHeader();
+        
+        // Display screen information
+        cout << "┌──────────────────────────────────────────────────────────────┐\n";
+        cout << "│ Process: " << left << setw(52) << name.substr(0, 52) << "│\n";
+        cout << "├──────────────────────────────────────────────────────────────┤\n";
+        cout << "│ Current Instruction Line: " << setw(6) << currentLine 
+             << " of " << setw(6) << totalLines 
+             << " (" << setw(3) << (currentLine * 100 / totalLines) << "%)       │\n";
+        cout << "├──────────────────────────────────────────────────────────────┤\n";
+        cout << "│ Timestamp: " << left << setw(53) << timestamp << "│\n";
+        cout << "└──────────────────────────────────────────────────────────────┘\n";
+        
+        // Display progress bar
+        cout << "\nProgress:\n";
+        cout << "[";
+        int progressWidth = 50;
+        int pos = progressWidth * currentLine / totalLines;
+        for (int i = 0; i < progressWidth; ++i) {
+            if (i < pos) cout << "=";
+            else if (i == pos) cout << ">";
+            else cout << " ";
+        }
+        cout << "] " << (currentLine * 100 / totalLines) << "%\n";
     }
 
     // Progress number in instruction line
