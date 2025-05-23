@@ -68,15 +68,17 @@ public:
             else cout << " ";
         }
         cout << "] " << (currentLine * 100 / totalLines) << "%\n";
+        
+        // Add specific instructions for the screen context
+        cout << "\nType \"exit\" to return to main menu" << endl;
     }
-    // Progress number in instruction line
+    
     void advance() {
         if (currentLine < totalLines)
             currentLine++;
     }
 };
 
-// Fix display for screen -r
 void enableUTF8Console() {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -93,7 +95,6 @@ void enableUTF8Console() {
 #endif
 }
 
-// Function to display the CSOPESY ASCII header
 void displayHeader() {
     cout << R"(
    _____         ____. ___________ .____       ________      _________
@@ -104,44 +105,73 @@ void displayHeader() {
 )" << endl;
 }
 
+void displayMainMenu() {
+    #ifdef _WIN32
+        system("cls");
+    #else
+        system("clear");
+    #endif
+    
+    displayHeader();
+    cout << "Hello, Welcome to AJEL OS command.net" << endl;
+    cout << "Available commands:" << endl;
+    cout << "  screen -s <name>  - Create a new screen" << endl;
+    cout << "  screen -r <name>  - Resume a screen" << endl;
+    cout << "  clear             - Clear the screen" << endl;
+    cout << "  exit              - Exit the program" << endl;
+    cout << "  scheduler-test    - Test the scheduler" << endl;
+    cout << "  scheduler-stop    - Stop the scheduler" << endl;
+    cout << "  report-util       - Report utilization" << endl;
+}
+
 int main() {
     string command;
     unordered_map<string, Screen> screens;
+    bool inScreen = false;  // Track if we're in a screen
+    string currentScreen;   // Track current screen name
 
     // enable UTF-8
     enableUTF8Console();
-
-    // Display initial messages
-    displayHeader();
-    cout << "Hello, Welcome to AJEL OS command.net" << endl;
-    cout << "Type \"exit\" to quit, \"clear\" to clear the screen" << endl;
+    displayMainMenu();
 
     // Main command loop
     while (true) {
-        cout << "\nEnter a command: ";
+        if (!inScreen) {
+            cout << "\nAJEL OS> ";
+        } else {
+            cout << "\nAJEL OS [" << currentScreen << "]> ";
+        }
+        
         getline(cin, command);
 
         if (command == "exit") {
-            cout << "exit command recognized. Exiting application." << endl;
-            break;
+            if (inScreen) {
+                // In screen context - return to main menu
+                inScreen = false;
+                displayMainMenu();
+            } else {
+                // In main menu - exit program
+                cout << "Exiting application." << endl;
+                break;
+            }
         }
         else if (command == "clear") {
-            #ifdef _WIN32
-                system("cls");
-            #else
-                system("clear");
-            #endif
-            displayHeader();
-            cout << "Hello, Welcome to AJEL OS command.net" << endl;
-            cout << "Type \"exit\" to quit, \"clear\" to clear the screen" << endl;
+            if (inScreen) {
+                screens[currentScreen].display();
+            } else {
+                displayMainMenu();
+            }
         }
         else if (command == "initialize") {
             cout << "initialize command recognized. Doing something." << endl;
         }
-        
-        // Screen -s function
         else if (command.rfind("screen -s ", 0) == 0) { 
-            string name = command.substr(10); // Get screen name
+            if (inScreen) {
+                cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
+                continue;
+            }
+            
+            string name = command.substr(10);
             if (screens.find(name) == screens.end()) {
                 screens[name] = Screen(name);
                 cout << "Screen \"" << name << "\" created." << endl;
@@ -149,13 +179,17 @@ int main() {
                 cout << "Screen \"" << name << "\" already exists." << endl;
             }
         }
-
-        // Screen -r function
         else if (command.rfind("screen -r ", 0) == 0) { 
-            string name = command.substr(10); // Get screen name 
+            if (inScreen) {
+                cout << "Already in a screen. Type 'exit' first." << endl;
+                continue;
+            }
+            
+            string name = command.substr(10);
             auto it = screens.find(name);
             if (it != screens.end()) {
-                it->second.advance(); // Pretend the process is working
+                inScreen = true;
+                currentScreen = name;
                 it->second.display();
             } else {
                 cout << "Screen \"" << name << "\" not found." << endl;
@@ -172,6 +206,11 @@ int main() {
         }
         else {
             cout << "Command not recognized." << endl;
+        }
+        
+        // If we're in a screen, advance the progress
+        if (inScreen && command != "exit") {
+            screens[currentScreen].advance();
         }
     }
 
