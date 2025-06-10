@@ -8,6 +8,7 @@
 #include <iomanip>  // For put_time
 #include <sstream>  // For stringstream
 #include <cstdlib>  // For system("clear") or system("cls")
+#include <vector>
 
 using namespace std;
 
@@ -79,6 +80,60 @@ public:
     }
 };
 
+// Structure to represent a process
+struct Process {
+    string name;
+    time_t startTime;
+    time_t endTime;
+    int core;
+    int tasksCompleted;
+    int totalTasks;
+    bool isFinished;
+};
+
+// Function to display the scheduler UI
+void displaySchedulerUI(const vector<Process>& processes) {
+    #ifdef _WIN32
+        system("cls");
+    #else
+        system("clear");
+    #endif
+
+    // Display header
+    cout << "Implementing the first-come-first-serve scheduler in your emulator\n";
+    cout << "------------------------------------------------------------------\n\n";
+
+    // Display running processes
+    cout << "Running processes:\n";
+    for (const auto& proc : processes) {
+        if (!proc.isFinished) {
+            tm localtm;
+            localtime_s(&localtm, &proc.startTime);
+            
+            cout << left << setw(12) << proc.name << " (";
+            cout << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
+            cout << right << setw(8) << "Core: " << proc.core;
+            cout << setw(8) << proc.tasksCompleted << " / " << proc.totalTasks << "\n";
+        }
+    }
+    cout << "\n";
+
+    // Display finished processes
+    cout << "Finished processes:\n";
+    for (const auto& proc : processes) {
+        if (proc.isFinished) {
+            tm localtm;
+            localtime_s(&localtm, &proc.endTime);
+            
+            cout << left << setw(12) << proc.name << " (";
+            cout << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
+            cout << right << setw(12) << "Finished";
+            cout << setw(8) << proc.tasksCompleted << " / " << proc.totalTasks << "\n";
+        }
+    }
+    cout << "\n";
+}
+
 void enableUTF8Console() {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -117,11 +172,11 @@ void displayMainMenu() {
     cout << "Available commands:" << endl;
     cout << "  screen -s <name>  - Create a new screen" << endl;
     cout << "  screen -r <name>  - Resume a screen" << endl;
-    cout << "  clear             - Clear the screen" << endl;
-    cout << "  exit              - Exit the program" << endl;
     cout << "  scheduler-test    - Test the scheduler" << endl;
     cout << "  scheduler-stop    - Stop the scheduler" << endl;
     cout << "  report-util       - Report utilization" << endl;
+    cout << "  clear             - Clear the screen" << endl;
+    cout << "  exit              - Exit the program" << endl;
 }
 
 int main() {
@@ -195,15 +250,37 @@ int main() {
                 cout << "Screen \"" << name << "\" not found." << endl;
             }
         }
-        else if (command == "scheduler-test") {
-            cout << "scheduler-test command recognized. Doing something." << endl;
-        }
+
         else if (command == "scheduler-stop") {
             cout << "scheduler-stop command recognized. Doing something." << endl;
         }
         else if (command == "report-util") {
             cout << "report-util command recognized. Doing something." << endl;
         }
+
+
+        // UI TEMPLATE
+        else if (command == "scheduler-test") {
+            vector<Process> exampleProcesses = {
+                {"process05", time(nullptr) - 3600, 0, 0, 1235, 5876, false},
+                {"process06", time(nullptr) - 1800, 0, 1, 3, 5876, false},
+                {"process07", time(nullptr) - 900, 0, 2, 9, 1000, false},
+                {"process08", time(nullptr) - 300, 0, 3, 12, 80, false},
+                {"process01", time(nullptr) - 7200, time(nullptr) - 3600, 0, 5876, 5876, true},
+                {"process02", time(nullptr) - 7100, time(nullptr) - 3500, 1, 5876, 5876, true},
+                {"process03", time(nullptr) - 7000, time(nullptr) - 3400, 2, 1000, 1000, true},
+                {"process04", time(nullptr) - 6900, time(nullptr) - 3300, 3, 80, 80, true}
+            };
+            displaySchedulerUI(exampleProcesses);
+            cout << "Press Enter to return to main menu...";
+            cin.ignore();  // Clear any existing input
+            cin.get();     // Wait for Enter key
+
+            // Return to main menu
+            displayMainMenu();
+        }
+
+
         else {
             cout << "Command not recognized." << endl;
         }
