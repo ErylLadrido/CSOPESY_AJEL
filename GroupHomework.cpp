@@ -1,7 +1,9 @@
 /** === CSOPESY MCO2 Multitasking OS ===
  *  Group members: (alphabetical)
+ *   - Abendan
+ *   - Ladrido, Eryl
+ *   - Rodriguez, Joaquin Andres
  *   - Tiu, Lance Wilem
- *   - 
  */
 
 
@@ -19,39 +21,67 @@
 #endif  // For UTF-8 display
 #include <iostream>
 #include <string>
+#include <vector>
 #include <unordered_map>
+#include <thread>
+#include <mutex>
+#include <chrono>
 #include <ctime>
 #include <iomanip>  // For put_time
 #include <sstream>  // For stringstream
 #include <cstdlib>  // For system("clear") or system("cls")
-#include <vector>
-#include <thread>
-#include <mutex>
-#include <chrono>
+#include <fstream>  // For file I/O (ofstream)
+#include <queue>    // For the ready queue of processes
+#include <condition_variable> // For thread synchronization
+
 
 // ===================== Libraries - END ===================== //
 
 using namespace std;
 
 void displayHeader();
+void displayMainMenu();
 
 // ======================= Global Variables ======================= //
 
-bool isSchedulerRunning = false; 
-thread schedulerThread; // threads for the scheduler to run concurrently
-mutex processMutex;
-vector<struct Process> globalProcesses; // List of processes within the scheduler
+const int NUM_CORES = 4; // Declare 4 cores for the CPU
+bool isSchedulerRunning = false;
+thread schedulerThread;
+vector<thread> cpu_workers;
+
+mutex processMutex; // Used for protecting shared resources like globalProcesses and cout
+vector<struct Process> globalProcesses; // List of all processes
 bool screenActive = false;
+
+// --- Threading & Scheduling Variables ---
+queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
+mutex queue_mutex;                  // Mutex to protect the ready_queue
+condition_variable scheduler_cv;    // Notifies worker threads about new processes
 
 // ===================== Global Variables - END ===================== //
 
+// ===================== Structures ===================== //
+
+/**
+ * Defines the process structure.
+ */
+struct Process {
+    string name;
+    time_t startTime;
+    time_t endTime;
+    int core; // Core that is executing or executed the process
+    int tasksCompleted;
+    int totalTasks; // In this context, this is the number of "print" commands
+    bool isFinished;
+};
+
+// =================== Structures - END =================== //
 
 
 // ===================== Classes ===================== //
 
-// === Screen Class === //
 /**
- * Class for the screen object. Creates a new screen with given name & a timestamp during its creation. 
+ * Class for the screen object. Creates a new screen with a given name & a timestamp.
  */
 class Screen {
 public:
@@ -65,40 +95,37 @@ public:
 
     Screen(const string& name, int totalLines = 100)
         : name(name), currentLine(1), totalLines(totalLines) {
-        // Get current time
         time_t now = time(0);
         tm localtm;
-
-        // Use localtime_s for safety (MSVC)
+#ifdef _WIN32
         localtime_s(&localtm, &now);
-
+#else
+        localtm = *localtime(&now);
+#endif
         stringstream ss;
         ss << put_time(&localtm, "%m/%d/%Y, %I:%M:%S %p");
         timestamp = ss.str();
     }
 
     void display() const {
-        #ifdef _WIN32
-            system("cls");
-        #else
-            system("clear");
-        #endif
+#ifdef _WIN32
+        system("cls");
+#else
+        system("clear");
+#endif
 
-        // Display header
         displayHeader();
-        
-        // Display screen information
+
         cout << "┌──────────────────────────────────────────────────────────────┐\n";
         cout << "│ Process: " << left << setw(52) << name.substr(0, 52) << "│\n";
         cout << "├──────────────────────────────────────────────────────────────┤\n";
-        cout << "│ Current Instruction Line: " << setw(6) << currentLine 
-             << " of " << setw(6) << totalLines 
-             << " (" << setw(3) << (currentLine * 100 / totalLines) << "%)       │\n";
+        cout << "│ Current Instruction Line: " << setw(6) << currentLine
+            << " of " << setw(6) << totalLines
+            << " (" << setw(3) << (currentLine * 100 / totalLines) << "%)      │\n";
         cout << "├──────────────────────────────────────────────────────────────┤\n";
         cout << "│ Timestamp: " << left << setw(53) << timestamp << "│\n";
         cout << "└──────────────────────────────────────────────────────────────┘\n";
-        
-        // Display progress bar
+
         cout << "\nProgress:\n[";
         int progressWidth = 50;
         int pos = progressWidth * currentLine / totalLines;
@@ -108,11 +135,10 @@ public:
             else cout << " ";
         }
         cout << "] " << (currentLine * 100 / totalLines) << "%\n";
-        
-        // Add specific instructions for the screen context
+
         cout << "\nType \"exit\" to return to main menu" << endl;
     }
-    
+
     void advance() {
         if (currentLine < totalLines)
             currentLine++;
@@ -121,75 +147,53 @@ public:
 
 // =================== Classes - END =================== //
 
-
-// ===================== Structures ===================== //
-
-// === Process structure === //
-/**
- * Defines the process object/structure
- */
-struct Process {
-    string name;
-    time_t startTime;
-    time_t endTime;
-    int core;
-    int tasksCompleted;
-    int totalTasks;
-    bool isFinished;
-};
-// =================== Structures _END =================== //
-
-
 // ===================== Functions ===================== //
 
-
-// === Display Scheduler UI Function === //
 /**
- * Displays the Scheduler UI. Displays processes, their progress, and core assignment. 
+ * Displays the Scheduler UI, showing running and finished processes.
  */
-void displaySchedulerUI(const vector<Process>& processes) { 
+void displaySchedulerUI(const vector<Process>& processes) {
 #ifdef _WIN32
     system("cls");
 #else
     system("clear");
 #endif
 
-    cout << "------------------------FCFC SCHEDULER----------------------\n\n";
+    cout << "------------------------ FCFS SCHEDULER (Multi-Core) -----------------------\n\n";
 
     cout << "Running processes:\n";
     for (const auto& p : processes) {
         if (!p.isFinished) {
-            tm localtm; // local time 
-
-// Time conversion (start)
+            tm localtm;
+            if (p.startTime != 0) { // Check if process has started
 #ifdef _WIN32
-            localtime_s(&localtm, &p.startTime); 
+                localtime_s(&localtm, &p.startTime);
 #else
-            localtm = *localtime(&proc.startTime);
+                localtm = *localtime(&p.startTime); // Fixed bug: was proc.startTime
 #endif
+            }
+            cout << left << setw(12) << p.name;
+            if (p.startTime != 0) {
+                cout << " (" << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
+            }
+            else {
+                cout << " (Waiting...)            ";
+            }
 
-            // Display process name, core, and progress
-            cout << left << setw(12) << p.name << " (";
-            cout << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
-            cout << right << setw(8) << "Core: " << p.core;
+            cout << right << setw(8) << "Core: " << (p.core == -1 ? "N/A" : to_string(p.core));
             cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << "\n";
         }
     }
 
-    // Display finished processes
     cout << "\nFinished processes:\n";
     for (const auto& p : processes) {
         if (p.isFinished) {
             tm localtm;
-
-// Time conversion (end)
 #ifdef _WIN32
             localtime_s(&localtm, &p.endTime);
 #else
-            localtm = *localtime(&proc.endTime);
+            localtm = *localtime(&p.endTime); // Fixed bug: was proc.endTime
 #endif
-
-            // Display process name, core, and completion time
             cout << left << setw(12) << p.name << " (";
             cout << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
             cout << right << setw(8) << "Core: " << p.core;
@@ -197,46 +201,129 @@ void displaySchedulerUI(const vector<Process>& processes) {
             cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << "\n";
         }
     }
-    cout << "\n";
+    cout << "\n--------------------------------------------------------------------------\n";
 }
 
-// === First-Come-First-Serve Scheduler Function === //
+
 /**
- * Implements the FCFS logic for the scheduler function.
+ * @brief This is the main function for each CPU worker thread.
+ * Each worker thread simulates a CPU core. It waits for processes to be added
+ * to the ready queue, picks one, and executes its tasks (print commands).
+ * @param coreId The ID of the CPU core this thread represents (0 to NUM_CORES-1).
  */
-void FCFSScheduler() {
-    for (auto& p : globalProcesses) {
+void cpu_worker_main(int coreId) {
+    while (isSchedulerRunning) {
+        Process* currentProcess = nullptr;
 
-        if (!isSchedulerRunning) break; // stop if scheduler stops
-        if (p.isFinished) continue; // skip finished processes
+        // --- Critical Section: Wait for and get a process from the queue ---
+        {
+            unique_lock<mutex> lock(queue_mutex);
+            // Wait until the queue is not empty OR the scheduler is stopping
+            scheduler_cv.wait(lock, [] { return !ready_queue.empty() || !isSchedulerRunning; });
 
-        // process start time
-        p.startTime = time(nullptr);
+            // If the scheduler has stopped and the queue is empty, the thread can exit.
+            if (!isSchedulerRunning && ready_queue.empty()) {
+                return;
+            }
 
-        // Task progress
-        for (int i = p.tasksCompleted; i < p.totalTasks && isSchedulerRunning; ++i) {
-            this_thread::sleep_for(chrono::milliseconds(10));
-            lock_guard<mutex> lock(processMutex); 
-            p.tasksCompleted++;
-        }
+            // Check again if queue is not empty before popping
+            if (!ready_queue.empty()) {
+                currentProcess = ready_queue.front();
+                ready_queue.pop();
+            }
+        } // The unique_lock is automatically released here.
 
-        // Mark process as finished when done
-        if (isSchedulerRunning) {
-            p.endTime = time(nullptr);
-            p.isFinished = true;
-            lock_guard<mutex> lock(processMutex);
-            displaySchedulerUI(globalProcesses);
+        // If a process was successfully dequeued, execute it.
+        if (currentProcess != nullptr) {
+            // --- Set process start time and assigned core ---
+            {
+                lock_guard<mutex> lock(processMutex);
+                currentProcess->core = coreId;
+                currentProcess->startTime = time(nullptr);
+            }
+
+            // --- Execute all tasks (print commands) for the process ---
+            string logFileName = currentProcess->name + ".txt";
+            ofstream outfile(logFileName); // Create/overwrite the log file
+
+            if (!outfile.is_open()) {
+                lock_guard<mutex> lock(processMutex);
+                cerr << "Error: Could not open file " << logFileName << " for writing." << endl;
+            }
+            else {
+                for (int i = 0; i < currentProcess->totalTasks; ++i) {
+                    if (!isSchedulerRunning) break; // Allow scheduler to stop mid-process
+
+                    this_thread::sleep_for(chrono::milliseconds(20)); // Simulate work for one task
+
+                    lock_guard<mutex> lock(processMutex); // Lock for updating shared process data
+                    currentProcess->tasksCompleted++;
+
+                    // --- Write the "print" command output to the process's log file ---
+                    time_t now = time(0);
+                    tm localtm;
+#ifdef _WIN32
+                    localtime_s(&localtm, &now);
+#else
+                    localtm = *localtime(&now);
+#endif
+                    stringstream ss;
+                    ss << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
+
+                    outfile << ss.str() << " Core:" << coreId << " \"Hello world from " << currentProcess->name << "!\"" << endl;
+                }
+            }
+            outfile.close();
+
+
+            // --- Mark process as finished ---
+            {
+                lock_guard<mutex> lock(processMutex);
+                // Only mark as fully finished if it completed all tasks
+                if (currentProcess->tasksCompleted == currentProcess->totalTasks) {
+                    currentProcess->endTime = time(nullptr);
+                    currentProcess->isFinished = true;
+                }
+            }
         }
     }
-    
-    isSchedulerRunning = false; // FCFS scheduler completed
 }
 
 
-// === Enable UTF8 Function === //
 /**
- * Enables UTF8 to be used the OS UI.
+ * @brief The main scheduler thread function.
+ * This function initializes the CPU worker threads and then feeds them
+ * processes from the global list in a First-Come-First-Serve manner.
  */
+void FCFSScheduler() {
+    // --- Start all CPU worker threads ---
+    cpu_workers.clear(); // Clear any previous worker threads
+    for (int i = 0; i < NUM_CORES; ++i) {
+        cpu_workers.emplace_back(cpu_worker_main, i);
+    }
+
+    // --- Add all processes to the ready queue for the workers to pick up ---
+    for (auto& proc : globalProcesses) {
+        if (!isSchedulerRunning) break;
+        {
+            lock_guard<mutex> lock(queue_mutex);
+            ready_queue.push(&proc); // Push a pointer to the process
+        }
+        scheduler_cv.notify_one(); // Notify one waiting worker thread that a job is available
+    }
+
+    // --- Wait for all worker threads to complete their execution ---
+    for (auto& worker : cpu_workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+
+    // Once all workers are done, the scheduler's job is finished.
+    isSchedulerRunning = false;
+}
+
+
 void enableUTF8Console() {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -253,209 +340,177 @@ void enableUTF8Console() {
 #endif
 }
 
-// === Display Header Function === //
-/**
- * Displays the OS Logo.
- */
 void displayHeader() {
     cout << R"(
-   _____         ____. ___________ .____       ________      _________
-  /  _  \       |    | \_   _____/ |    |      \_____  \    /   _____/
- /  /_\  \      |    |  |    __)_  |    |       /   |   \   \_____  \ 
-/    |    \ /\__|    |  |        \ |    |___   /    |    \  /        \
-\____|____/ \________| /_________/ |________\  \_________/ /_________/
+    _____           ____. ___________ .____         ________      _________
+   /  _  \         |    | \_   _____/ |    |        \_____  \    /   _____/
+  /  /_\  \        |    |  |    __)_  |    |         /   |   \   \_____  \ 
+ /    |    \   /\__|    |  |        \ |    |___     /    |    \  /        \
+ \____|__  /   \________| /_________/ |________\    \_______  / /_________/
+         \/                                                 \/             
 )" << endl;
 }
 
-// === Display Main Menu Function === //
-/**
- * Displays the main menu functions & commands.
- */
 void displayMainMenu() {
-    #ifdef _WIN32
-        system("cls");
-    #else
-        system("clear");
-    #endif
-    
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+
     displayHeader();
     cout << "Hello, Welcome to AJEL OS command.net" << endl;
     cout << "Available commands:" << endl;
-    cout << "  screen -s <name>  - Create a new screen" << endl;
-    cout << "  screen -r <name>  - Resume a screen" << endl;
-    cout << "  scheduler-test    - Test the scheduler" << endl;
-    cout << "  scheduler-stop    - Stop the scheduler" << endl;
-    cout << "  report-util       - Report utilization" << endl;
-    cout << "  clear             - Clear the screen" << endl;
-    cout << "  exit              - Exit the program" << endl;
+    cout << "  screen -s <name>    - Create a new screen" << endl;
+    cout << "  screen -r <name>    - Resume a screen" << endl;
+    cout << "  screen -ls          - List running/finished processes" << endl;
+    cout << "  scheduler-test      - Start the scheduler with the test case" << endl;
+    cout << "  scheduler-stop      - Stop the scheduler" << endl;
+    cout << "  report-util         - (Not implemented)" << endl;
+    cout << "  clear               - Clear the screen" << endl;
+    cout << "  exit                - Exit the program" << endl;
 }
 
 // =================== Functions - END =================== //
-
 
 // ===================== Main ===================== //
 int main() {
     string command;
     unordered_map<string, Screen> screens;
-    bool inScreen = false;  // Track if we're in a screen
-    string currentScreen;   // Track current screen name
+    bool inScreen = false;
+    string currentScreen;
 
-    // enable UTF-8 (windows)
     enableUTF8Console();
     displayMainMenu();
 
     // Main command loop
     while (true) {
-        if (!inScreen) {
-            cout << "\nAJEL OS> ";
-        } else {
+        if (inScreen) {
             cout << "\nAJEL OS [" << currentScreen << "]> ";
         }
-        
+        else {
+            // Display main prompt, but only if scheduler isn't running.
+            // When scheduler is active, let output from other threads show.
+            if (!isSchedulerRunning) {
+                cout << "\nAJEL OS> ";
+            }
+        }
+
         getline(cin, command);
 
-        // == Exit Command == -- exit to main menu or program
         if (command == "exit") {
             if (inScreen) {
-                // In screen context - return to main menu
                 inScreen = false;
                 displayMainMenu();
-            } else {
-                // In main menu - exit program
+            }
+            else {
+                // If scheduler is running, stop it first.
+                if (isSchedulerRunning) {
+                    isSchedulerRunning = false;
+                    scheduler_cv.notify_all();
+                    if (schedulerThread.joinable()) {
+                        schedulerThread.join();
+                    }
+                }
                 cout << "Exiting application." << endl;
                 break;
             }
         }
-
-        // == Clear Command == -- clear screen
         else if (command == "clear") {
             if (inScreen) {
                 screens[currentScreen].display();
-            } else {
+            }
+            else {
                 displayMainMenu();
             }
         }
-
-        // == Initialize Command == 
-        else if (command == "initialize") {
-            cout << "initialize command recognized. Doing something." << endl;
-        }
-
-        // == Screen -s Command == -- create new screen
-        else if (command.rfind("screen -s ", 0) == 0) { 
+        else if (command.rfind("screen -s ", 0) == 0) {
             if (inScreen) {
                 cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
                 continue;
             }
-            
+
             string name = command.substr(10);
             if (screens.find(name) == screens.end()) {
                 screens[name] = Screen(name);
                 cout << "Screen \"" << name << "\" created." << endl;
-            } else {
+            }
+            else {
                 cout << "Screen \"" << name << "\" already exists." << endl;
             }
         }
-
-        // == Screen -r Command == -- open existing screen
-        else if (command.rfind("screen -r ", 0) == 0) { 
+        else if (command.rfind("screen -r ", 0) == 0) {
             if (inScreen) {
                 cout << "Already in a screen. Type 'exit' first." << endl;
                 continue;
             }
-            
+
             string name = command.substr(10);
             auto it = screens.find(name);
             if (it != screens.end()) {
                 inScreen = true;
                 currentScreen = name;
                 it->second.display();
-            } else {
+            }
+            else {
                 cout << "Screen \"" << name << "\" not found." << endl;
             }
         }
-
-
-        // UI TEMPLATE
-        //else if (command == "scheduler-test") {
-        //    vector<Process> exampleProcesses = {
-        //        {"process05", time(nullptr) - 3600, 0, 0, 1235, 5876, false},
-        //        {"process06", time(nullptr) - 1800, 0, 1, 3, 5876, false},
-        //       {"process07", time(nullptr) - 900, 0, 2, 9, 1000, false},
-        //        {"process08", time(nullptr) - 300, 0, 3, 12, 80, false},
-        //        {"process01", time(nullptr) - 7200, time(nullptr) - 3600, 0, 5876, 5876, true},
-        //       {"process02", time(nullptr) - 7100, time(nullptr) - 3500, 1, 5876, 5876, true},
-        //        {"process03", time(nullptr) - 7000, time(nullptr) - 3400, 2, 1000, 1000, true},
-        //        {"process04", time(nullptr) - 6900, time(nullptr) - 3300, 3, 80, 80, true}
-        //    };
-        //    displaySchedulerUI(exampleProcesses);
-        //    cout << "Press Enter to return to main menu...";
-        //    cin.ignore();  // Clear any existing input
-        //    cin.get();     // Wait for Enter key
-
-            // Return to main menu
-        //    displayMainMenu();
-        //}
-
-        // == Scheduler-test Command == -- start the scheduler & its processes
+        // == List Scheduler Processes Command ==
+        else if (command == "screen -ls") {
+            lock_guard<mutex> lock(processMutex);
+            displaySchedulerUI(globalProcesses);
+        }
+        // == Scheduler-test Command ==
         else if (command == "scheduler-test") {
-
             if (isSchedulerRunning) {
                 cout << "Scheduler is already running." << endl;
                 continue;
             }
 
-            // Process list
-            globalProcesses = {
-                {"process01", 0, 0, 0, 0, 100, false},
-                {"process02", 0, 0, 1, 0, 80, false},
-                {"process03", 0, 0, 2, 0, 60, false},
-                {"process04", 0, 0, 3, 0, 40, false}
-            };
+            // --- TEST CASE: Create 10 processes, each with 100 print commands ---
+            lock_guard<mutex> lock(processMutex);
+            globalProcesses.clear();
+            for (int i = 1; i <= 10; ++i) {
+                stringstream ss;
+                ss << "process" << setfill('0') << setw(2) << i;
+                globalProcesses.push_back({ ss.str(), 0, 0, -1, 0, 100, false });
+            }
 
-            // Activate scheduler
             isSchedulerRunning = true;
             schedulerThread = thread(FCFSScheduler);
-            cout << "Scheduler started. Type 'scheduler-stop' to stop." << endl;
-        } 
-
-        // == Scheduler-stop Command == -- stop the scheduler & its processes
+            cout << "Scheduler started with 10 processes on 4 cores." << endl;
+            cout << "Type 'screen -ls' to view progress or 'scheduler-stop' to stop." << endl;
+        }
+        // == Scheduler-stop Command ==
         else if (command == "scheduler-stop") {
-
             if (!isSchedulerRunning) {
                 cout << "Scheduler is not running." << endl;
                 continue;
             }
 
-            // Stop scheduler
+            cout << "Stopping scheduler..." << endl;
             isSchedulerRunning = false;
-            if (schedulerThread.joinable())
+            scheduler_cv.notify_all(); // Wake up all waiting threads to allow them to exit
+            if (schedulerThread.joinable()) {
                 schedulerThread.join();
+            }
 
             cout << "Scheduler stopped." << endl;
 
-            // Display process list
             lock_guard<mutex> lock(processMutex);
             displaySchedulerUI(globalProcesses);
-            cout << "Press Enter to return to main menu...";
-
-            cin.ignore(); // Clear any existing input
-            cin.get(); // Wait for Enter key
-            displayMainMenu(); 
         }
-
-        // == Report-util Command ==
         else if (command == "report-util") {
-            cout << "report-util command recognized. Doing something." << endl;
+            cout << "report-util command not yet implemented." << endl;
         }
-
-        else {
-            cout << "Command not recognized." << endl;
-        }
-        
-        // If we're in a screen, advance the progress
-        if (inScreen && command != "exit") {
-            screens[currentScreen].advance();
+        else if (!command.empty()) {
+            if (inScreen) {
+                screens[currentScreen].advance(); // Advance screen on any command
+            }
+            else {
+                cout << "Command not recognized." << endl;
+            }
         }
     }
 

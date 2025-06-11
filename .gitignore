@@ -26,3 +26,4 @@ build/
 # Backup and layout
 *Layout*.json
 *.backup.json
+*.txt
