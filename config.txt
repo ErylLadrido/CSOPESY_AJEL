@@ -1,0 +1,7 @@
+num-cpu = 1
+scheduler = fcfs
+quantum-cycles = 2
+batch-process-freq = 3
+min-ins = 100
+max-ins = 200
+delay-per-exec = 10
