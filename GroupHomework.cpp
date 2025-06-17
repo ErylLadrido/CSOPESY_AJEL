@@ -1,6 +1,6 @@
 /** === CSOPESY MCO2 Multitasking OS ===
  *  Group members: (alphabetical)
- *   - Abendan
+ *   - Abendan, Ashley
  *   - Ladrido, Eryl
  *   - Rodriguez, Joaquin Andres
  *   - Tiu, Lance Wilem
@@ -44,7 +44,6 @@ void displayMainMenu();
 
 // ======================= Global Variables ======================= //
 
-const int NUM_CORES = 4; // Declare 4 cores for the CPU
 bool isSchedulerRunning = false;
 bool isSystemInitialized = false; // New flag to track system initialization
 thread schedulerThread;
@@ -71,13 +70,13 @@ struct SystemConfig {
     
     // Default constructor with default values
     SystemConfig() : 
-        num_cpu(4), 
-        scheduler("fcfs"), 
-        quantum_cycles(5),
-        batch_process_freq(1),
-        min_ins(1000),
-        max_ins(2000),
-        delay_per_exec(100) {}
+        num_cpu(4), // range 1-128
+        scheduler("fcfs"), // fcfs or rr
+        quantum_cycles(5), // range 1-2^32
+        batch_process_freq(1), // range 1-2^32
+        min_ins(1000), // range 1-2^32
+        max_ins(2000), // range 1-2^32
+        delay_per_exec(100) {} // range 0-2^32
 } systemConfig;
 
 // ===================== Global Variables - END ===================== //
@@ -406,7 +405,7 @@ void cpu_worker_main(int coreId) {
 void FCFSScheduler() {
     // --- Start all CPU worker threads ---
     cpu_workers.clear(); // Clear any previous worker threads
-    for (int i = 0; i < NUM_CORES; ++i) {
+    for (int i = 0; i < systemConfig.num_cpu; ++i) {
         cpu_workers.emplace_back(cpu_worker_main, i);
     }
 
