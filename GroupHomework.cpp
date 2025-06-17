@@ -266,49 +266,102 @@ void displaySchedulerUI(const vector<Process>& processes) {
     system("clear");
 #endif
 
-    cout << "------------------------ FCFS SCHEDULER (Multi-Core) -----------------------\n\n";
+    displayHeader();
 
-    cout << "Running processes:\n";
-    for (const auto& p : processes) {
-        if (!p.isFinished) {
-            tm localtm;
-            if (p.startTime != 0) { // Check if process has started
-#ifdef _WIN32
-                localtime_s(&localtm, &p.startTime);
-#else
-                localtm = *localtime(&p.startTime); // Fixed bug: was proc.startTime
-#endif
-            }
-            cout << left << setw(12) << p.name;
-            if (p.startTime != 0) {
-                cout << " (" << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
-            }
-            else {
-                cout << " (Waiting...)            ";
-            }
+    // Calculate CPU utilization statistics
+    int totalCores = systemConfig.num_cpu;
+    int coresUsed = 0;
+    int runningProcesses = 0;
+    int finishedProcesses = 0;
 
-            cout << right << setw(8) << "Core: " << (p.core == -1 ? "N/A" : to_string(p.core));
-            cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << "\n";
+    // Count cores in use and process statistics
+    vector<bool> coreInUse(totalCores, false);
+    for (const auto& process : processes) {
+        if (!process.isFinished) {
+            runningProcesses++;
+            if (process.core != -1 && process.core < totalCores) {
+                coreInUse[process.core] = true;
+            }
+        }
+        else {
+            finishedProcesses++;
         }
     }
 
-    cout << "\nFinished processes:\n";
-    for (const auto& p : processes) {
-        if (p.isFinished) {
-            tm localtm;
+    // Count cores actually in use
+    for (bool inUse : coreInUse) {
+        if (inUse) coresUsed++;
+    }
+
+    int coresAvailable = totalCores - coresUsed;
+    double cpuUtilization = totalCores > 0 ? (static_cast<double>(coresUsed) / totalCores) * 100.0 : 0.0;
+
+    cout << "CPU UTILIZATION REPORT" << endl;
+    cout << "======================================" << endl;
+    cout << "CPU Utilization: " << fixed << setprecision(2) << cpuUtilization << "%" << endl;
+    cout << "Cores used: " << coresUsed << endl;
+    cout << "Cores available: " << coresAvailable << endl;
+    cout << "Total cores: " << totalCores << endl;
+    cout << endl;
+
+    cout << "Running processes:" << endl;
+    if (runningProcesses == 0) {
+        cout << "No running processes." << endl;
+    }
+    else {
+        for (const auto& p : processes) {
+            if (!p.isFinished) {
+                tm localtm;
+                string startTimeStr = "Waiting...            ";
+                if (p.startTime != 0) {
 #ifdef _WIN32
-            localtime_s(&localtm, &p.endTime);
+                    localtime_s(&localtm, &p.startTime);
 #else
-            localtm = *localtime(&p.endTime); // Fixed bug: was proc.endTime
+                    localtm = *localtime(&p.startTime);
 #endif
-            cout << left << setw(12) << p.name << " (";
-            cout << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p") << ")";
-            cout << right << setw(8) << "Core: " << p.core;
-            cout << right << setw(12) << "Finished";
-            cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << "\n";
+                    stringstream ss;
+                    ss << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p");
+                    startTimeStr = ss.str();
+                }
+
+                cout << left << setw(12) << p.name;
+                cout << " (" << setw(25) << startTimeStr << ")";
+                cout << right << setw(8) << "Core: " << (p.core == -1 ? "N/A" : to_string(p.core));
+                cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << endl;
+            }
         }
     }
-    cout << "\n--------------------------------------------------------------------------\n";
+
+    cout << endl << "Finished processes:" << endl;
+    if (finishedProcesses == 0) {
+        cout << "No finished processes." << endl;
+    }
+    else {
+        for (const auto& p : processes) {
+            if (p.isFinished) {
+                tm localtm;
+#ifdef _WIN32
+                localtime_s(&localtm, &p.endTime);
+#else
+                localtm = *localtime(&p.endTime);
+#endif
+                stringstream ss;
+                ss << put_time(&localtm, "%m/%d/%Y %I:%M:%S%p");
+
+                cout << left << setw(12) << p.name << " (";
+                cout << setw(25) << ss.str() << ")";
+                cout << right << setw(8) << "Core: " << p.core;
+                cout << right << setw(12) << "Finished";
+                cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << endl;
+            }
+        }
+    }
+
+    cout << endl << "======================================" << endl;
+    cout << "Total processes: " << processes.size() << endl;
+    cout << "Running: " << runningProcesses << endl;
+    cout << "Finished: " << finishedProcesses << endl;
+    cout << "======================================" << endl;
 }
 
 
@@ -479,6 +532,132 @@ void displayMainMenu() {
     cout << "  exit                - Exit the program" << endl;
 }
 
+/**
+ * Generate CPU utilization report and save to csopesy-log.txt
+ */
+void generateUtilizationReport() {
+    lock_guard<mutex> lock(processMutex);
+
+    // Calculate CPU utilization statistics
+    int totalCores = systemConfig.num_cpu;
+    int coresUsed = 0;
+    int runningProcesses = 0;
+    int finishedProcesses = 0;
+
+    // Count cores in use and process statistics
+    vector<bool> coreInUse(totalCores, false);
+    for (const auto& process : globalProcesses) {
+        if (!process.isFinished) {
+            runningProcesses++;
+            if (process.core != -1 && process.core < totalCores) {
+                coreInUse[process.core] = true;
+            }
+        }
+        else {
+            finishedProcesses++;
+        }
+    }
+
+    // Count cores actually in use
+    for (bool inUse : coreInUse) {
+        if (inUse) coresUsed++;
+    }
+
+    int coresAvailable = totalCores - coresUsed;
+    double cpuUtilization = totalCores > 0 ? (static_cast<double>(coresUsed) / totalCores) * 100.0 : 0.0;
+
+    // Generate timestamp for the report
+    time_t now = time(0);
+    tm localtm;
+#ifdef _WIN32
+    localtime_s(&localtm, &now);
+#else
+    localtm = *localtime(&now);
+#endif
+    stringstream timestamp;
+    timestamp << put_time(&localtm, "%m/%d/%Y, %I:%M:%S %p");
+
+    // Write report to file
+    ofstream reportFile("csopesy-log.txt");
+    if (!reportFile.is_open()) {
+        cout << "Error: Could not create csopesy-log.txt file." << endl;
+        return;
+    }
+
+    // Write the exact same format as screen -ls
+    reportFile << "CPU UTILIZATION REPORT" << endl;
+    reportFile << "Generated: " << timestamp.str() << endl;
+    reportFile << "======================================" << endl;
+    reportFile << "CPU Utilization: " << fixed << setprecision(2) << cpuUtilization << "%" << endl;
+    reportFile << "Cores used: " << coresUsed << endl;
+    reportFile << "Cores available: " << coresAvailable << endl;
+    reportFile << "Total cores: " << totalCores << endl;
+    reportFile << endl;
+
+    // Write running processes
+    reportFile << "Running processes:" << endl;
+    if (runningProcesses == 0) {
+        reportFile << "No running processes." << endl;
+    }
+    else {
+        for (const auto& p : globalProcesses) {
+            if (!p.isFinished) {
+                tm startTime;
+                string startTimeStr = "Waiting...            ";
+                if (p.startTime != 0) {
+#ifdef _WIN32
+                    localtime_s(&startTime, &p.startTime);
+#else
+                    startTime = *localtime(&p.startTime);
+#endif
+                    stringstream ss;
+                    ss << put_time(&startTime, "%m/%d/%Y %I:%M:%S%p");
+                    startTimeStr = ss.str();
+                }
+
+                reportFile << left << setw(12) << p.name;
+                reportFile << " (" << setw(25) << startTimeStr << ")";
+                reportFile << right << setw(8) << "Core: " << (p.core == -1 ? "N/A" : to_string(p.core));
+                reportFile << setw(8) << p.tasksCompleted << " / " << p.totalTasks << endl;
+            }
+        }
+    }
+
+    reportFile << endl << "Finished processes:" << endl;
+    if (finishedProcesses == 0) {
+        reportFile << "No finished processes." << endl;
+    }
+    else {
+        for (const auto& p : globalProcesses) {
+            if (p.isFinished) {
+                tm endTime;
+#ifdef _WIN32
+                localtime_s(&endTime, &p.endTime);
+#else
+                endTime = *localtime(&p.endTime);
+#endif
+                stringstream ss;
+                ss << put_time(&endTime, "%m/%d/%Y %I:%M:%S%p");
+
+                reportFile << left << setw(12) << p.name << " (";
+                reportFile << setw(25) << ss.str() << ")";
+                reportFile << right << setw(8) << "Core: " << p.core;
+                reportFile << right << setw(12) << "Finished";
+                reportFile << setw(8) << p.tasksCompleted << " / " << p.totalTasks << endl;
+            }
+        }
+    }
+
+    reportFile << endl << "======================================" << endl;
+    reportFile << "Total processes: " << globalProcesses.size() << endl;
+    reportFile << "Running: " << runningProcesses << endl;
+    reportFile << "Finished: " << finishedProcesses << endl;
+    reportFile << "======================================" << endl;
+
+    reportFile.close();
+
+    cout << "CPU utilization report generated and saved to csopesy-log.txt" << endl;
+}
 // =================== Functions - END =================== //
 
 // ===================== Main ===================== //
@@ -614,7 +793,11 @@ int main() {
             displaySchedulerUI(globalProcesses);
         }
         else if (command == "report-util") {
-            cout << "report-util command not yet implemented." << endl;
+            if (!isSystemInitialized) {
+                cout << "System not initialized. Please run 'initialize' first." << endl;
+                continue;
+            }
+            generateUtilizationReport();
         }
         else if (!command.empty()) {
             if (inScreen) {
