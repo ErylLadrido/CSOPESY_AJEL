@@ -46,6 +46,7 @@ void displayMainMenu();
 
 const int NUM_CORES = 4; // Declare 4 cores for the CPU
 bool isSchedulerRunning = false;
+bool isSystemInitialized = false; // New flag to track system initialization
 thread schedulerThread;
 vector<thread> cpu_workers;
 
@@ -57,6 +58,27 @@ bool screenActive = false;
 queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
 mutex queue_mutex;                  // Mutex to protect the ready_queue
 condition_variable scheduler_cv;    // Notifies worker threads about new processes
+
+// --- Configuration Variables ---
+struct SystemConfig {
+    int num_cpu;
+    string scheduler;
+    int quantum_cycles;
+    int batch_process_freq;
+    int min_ins;
+    int max_ins;
+    int delay_per_exec;
+    
+    // Default constructor with default values
+    SystemConfig() : 
+        num_cpu(4), 
+        scheduler("fcfs"), 
+        quantum_cycles(5),
+        batch_process_freq(1),
+        min_ins(1000),
+        max_ins(2000),
+        delay_per_exec(100) {}
+} systemConfig;
 
 // ===================== Global Variables - END ===================== //
 
@@ -148,6 +170,92 @@ public:
 // =================== Classes - END =================== //
 
 // ===================== Functions ===================== //
+
+/**
+ * Load configuration from config.txt file
+ * For now, uses default values since config.txt is not implemented yet
+ */
+bool loadConfig() {
+    // TODO: Implement actual config file reading
+    // For now, we'll use default values from SystemConfig constructor
+    
+    ifstream configFile("config.txt");
+    if (configFile.is_open()) {
+        string line;
+        while (getline(configFile, line)) {
+            // Skip empty lines and comments
+            if (line.empty() || line[0] == '#') continue;
+            
+            size_t equalPos = line.find('=');
+            if (equalPos != string::npos) {
+                string key = line.substr(0, equalPos);
+                string value = line.substr(equalPos + 1);
+                
+                // Trim whitespace (simple version)
+                key.erase(0, key.find_first_not_of(" \t"));
+                key.erase(key.find_last_not_of(" \t") + 1);
+                value.erase(0, value.find_first_not_of(" \t"));
+                value.erase(value.find_last_not_of(" \t") + 1);
+                
+                // Parse configuration values
+                if (key == "num-cpu") {
+                    systemConfig.num_cpu = stoi(value);
+                } else if (key == "scheduler") {
+                    systemConfig.scheduler = value;
+                } else if (key == "quantum-cycles") {
+                    systemConfig.quantum_cycles = stoi(value);
+                } else if (key == "batch-process-freq") {
+                    systemConfig.batch_process_freq = stoi(value);
+                } else if (key == "min-ins") {
+                    systemConfig.min_ins = stoi(value);
+                } else if (key == "max-ins") {
+                    systemConfig.max_ins = stoi(value);
+                } else if (key == "delay-per-exec") {
+                    systemConfig.delay_per_exec = stoi(value);
+                }
+            }
+        }
+        configFile.close();
+        return true;
+    } else {
+        // Config file not found, using default values
+        cout << "Config file not found. Using default configuration values." << endl;
+        return false;
+    }
+}
+
+/**
+ * Initialize the system with configuration parameters
+ */
+void initializeSystem() {
+    if (isSystemInitialized) {
+        cout << "System is already initialized." << endl;
+        return;
+    }
+    
+    cout << "Initializing system..." << endl;
+    
+    // Load configuration
+    loadConfig();
+    
+    // Display loaded configuration
+    cout << "\nSystem Configuration:" << endl;
+    cout << "├── Number of CPUs: " << systemConfig.num_cpu << endl;
+    cout << "├── Scheduler Algorithm: " << systemConfig.scheduler << endl;
+    cout << "├── Quantum Cycles: " << systemConfig.quantum_cycles << endl;
+    cout << "├── Batch Process Frequency: " << systemConfig.batch_process_freq << endl;
+    cout << "├── Min Instructions: " << systemConfig.min_ins << endl;
+    cout << "├── Max Instructions: " << systemConfig.max_ins << endl;
+    cout << "└── Delay per Execution: " << systemConfig.delay_per_exec << " ms" << endl;
+    
+    // Initialize system components
+    globalProcesses.clear();
+    
+    // Mark system as initialized
+    isSystemInitialized = true;
+    cout << "\nSystem initialized successfully!" << endl;
+    cout << "You can now use scheduler-start to begin process scheduling." << endl;
+}
 
 /**
  * Displays the Scheduler UI, showing running and finished processes.
@@ -361,12 +469,13 @@ void displayMainMenu() {
     displayHeader();
     cout << "Hello, Welcome to AJEL OS command.net" << endl;
     cout << "Available commands:" << endl;
+    cout << "  initialize          - Initialize the system with config parameters" << endl;
     cout << "  screen -s <name>    - Create a new screen" << endl;
     cout << "  screen -r <name>    - Resume a screen" << endl;
     cout << "  screen -ls          - List running/finished processes" << endl;
-    cout << "  scheduler-test      - Start the scheduler with the test case" << endl;
+    cout << "  scheduler-start     - Start the scheduler" << endl;
     cout << "  scheduler-stop      - Stop the scheduler" << endl;
-    cout << "  report-util         - (Not implemented)" << endl;
+    cout << "  report-util         - Generate CPU utilization report" << endl;
     cout << "  clear               - Clear the screen" << endl;
     cout << "  exit                - Exit the program" << endl;
 }
@@ -416,6 +525,10 @@ int main() {
                 break;
             }
         }
+        // == Initialize Command ==
+        else if (command == "initialize") {
+            initializeSystem();
+        }
         else if (command == "clear") {
             if (inScreen) {
                 screens[currentScreen].display();
@@ -462,12 +575,12 @@ int main() {
             displaySchedulerUI(globalProcesses);
         }
         // == Scheduler-test Command ==
-        else if (command == "scheduler-test") {
+        else if (command == "scheduler-start") {
             if (isSchedulerRunning) {
                 cout << "Scheduler is already running." << endl;
                 continue;
             }
-
+            /*
             // --- TEST CASE: Create 10 processes, each with 100 print commands ---
             lock_guard<mutex> lock(processMutex);
             globalProcesses.clear();
@@ -475,7 +588,7 @@ int main() {
                 stringstream ss;
                 ss << "process" << setfill('0') << setw(2) << i;
                 globalProcesses.push_back({ ss.str(), 0, 0, -1, 0, 100, false });
-            }
+            }*/
 
             isSchedulerRunning = true;
             schedulerThread = thread(FCFSScheduler);
