@@ -68,15 +68,27 @@ struct SystemConfig {
     int max_ins;
     int delay_per_exec;
     
-    // Default constructor with default values
+   // Constructor - no default values, must be loaded from config
     SystemConfig() : 
-        num_cpu(4), // range 1-128
-        scheduler("fcfs"), // fcfs or rr
-        quantum_cycles(5), // range 1-2^32
-        batch_process_freq(1), // range 1-2^32
-        min_ins(1000), // range 1-2^32
-        max_ins(2000), // range 1-2^32
-        delay_per_exec(100) {} // range 0-2^32
+        num_cpu(0), 
+        scheduler(""), 
+        quantum_cycles(0),
+        batch_process_freq(0),
+        min_ins(0),
+        max_ins(0),
+        delay_per_exec(0) {}
+
+    // Method to validate configuration
+    bool isValid() const {
+        return num_cpu > 0 && 
+               !scheduler.empty() && 
+               quantum_cycles > 0 && 
+               batch_process_freq > 0 && 
+               min_ins > 0 && 
+               max_ins > 0 && 
+               max_ins >= min_ins &&
+               delay_per_exec >= 0;
+    }
 } systemConfig;
 
 // ===================== Global Variables - END ===================== //
@@ -172,55 +184,122 @@ public:
 
 /**
  * Load configuration from config.txt file
- * For now, uses default values since config.txt is not implemented yet
+ * Returns true if config was loaded successfully, false otherwise
  */
 bool loadConfig() {
-    // TODO: Implement actual config file reading
-    // For now, we'll use default values from SystemConfig constructor
-    
     ifstream configFile("config.txt");
-    if (configFile.is_open()) {
-        string line;
-        while (getline(configFile, line)) {
-            // Skip empty lines and comments
-            if (line.empty() || line[0] == '#') continue;
-            
-            size_t equalPos = line.find('=');
-            if (equalPos != string::npos) {
-                string key = line.substr(0, equalPos);
-                string value = line.substr(equalPos + 1);
-                
-                // Trim whitespace (simple version)
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
-                
-                // Parse configuration values
-                if (key == "num-cpu") {
-                    systemConfig.num_cpu = stoi(value);
-                } else if (key == "scheduler") {
-                    systemConfig.scheduler = value;
-                } else if (key == "quantum-cycles") {
-                    systemConfig.quantum_cycles = stoi(value);
-                } else if (key == "batch-process-freq") {
-                    systemConfig.batch_process_freq = stoi(value);
-                } else if (key == "min-ins") {
-                    systemConfig.min_ins = stoi(value);
-                } else if (key == "max-ins") {
-                    systemConfig.max_ins = stoi(value);
-                } else if (key == "delay-per-exec") {
-                    systemConfig.delay_per_exec = stoi(value);
-                }
-            }
-        }
-        configFile.close();
-        return true;
-    } else {
-        // Config file not found, using default values
-        cout << "Config file not found. Using default configuration values." << endl;
+    if (!configFile.is_open()) {
+        cout << "Error: config.txt file not found!" << endl;
+        cout << "Please create a config.txt file with the following format:" << endl;
+        cout << "num-cpu=4" << endl;
+        cout << "scheduler=fcfs" << endl;
+        cout << "quantum-cycles=5" << endl;
+        cout << "batch-process-freq=1" << endl;
+        cout << "min-ins=1000" << endl;
+        cout << "max-ins=2000" << endl;
+        cout << "delay-per-exec=100" << endl;
         return false;
     }
+    
+    string line;
+    vector<string> missingKeys;
+    vector<string> requiredKeys = {"num-cpu", "scheduler", "quantum-cycles", 
+                                   "batch-process-freq", "min-ins", "max-ins", "delay-per-exec"};
+    vector<bool> keyFound(requiredKeys.size(), false);
+    
+    cout << "Reading configuration from config.txt..." << endl;
+    
+    while (getline(configFile, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#') continue;
+        
+        size_t equalPos = line.find('=');
+        if (equalPos == string::npos) {
+            cout << "Warning: Invalid line format ignored: " << line << endl;
+            continue;
+        }
+        
+        string key = line.substr(0, equalPos);
+        string value = line.substr(equalPos + 1);
+        
+        // Trim whitespace
+        key.erase(0, key.find_first_not_of(" \t\r\n"));
+        key.erase(key.find_last_not_of(" \t\r\n") + 1);
+        value.erase(0, value.find_first_not_of(" \t\r\n"));
+        value.erase(value.find_last_not_of(" \t\r\n") + 1);
+        
+        try {
+            // Parse configuration values
+            if (key == "num-cpu") {
+                systemConfig.num_cpu = stoi(value);
+                keyFound[0] = true;
+                cout << "  ✓ num-cpu: " << systemConfig.num_cpu << endl;
+            } else if (key == "scheduler") {
+                systemConfig.scheduler = value;
+                keyFound[1] = true;
+                cout << "  ✓ scheduler: " << systemConfig.scheduler << endl;
+            } else if (key == "quantum-cycles") {
+                systemConfig.quantum_cycles = stoi(value);
+                keyFound[2] = true;
+                cout << "  ✓ quantum-cycles: " << systemConfig.quantum_cycles << endl;
+            } else if (key == "batch-process-freq") {
+                systemConfig.batch_process_freq = stoi(value);
+                keyFound[3] = true;
+                cout << "  ✓ batch-process-freq: " << systemConfig.batch_process_freq << endl;
+            } else if (key == "min-ins") {
+                systemConfig.min_ins = stoi(value);
+                keyFound[4] = true;
+                cout << "  ✓ min-ins: " << systemConfig.min_ins << endl;
+            } else if (key == "max-ins") {
+                systemConfig.max_ins = stoi(value);
+                keyFound[5] = true;
+                cout << "  ✓ max-ins: " << systemConfig.max_ins << endl;
+            } else if (key == "delay-per-exec") {
+                systemConfig.delay_per_exec = stoi(value);
+                keyFound[6] = true;
+                cout << "  ✓ delay-per-exec: " << systemConfig.delay_per_exec << " ms" << endl;
+            } else {
+                cout << "Warning: Unknown configuration key ignored: " << key << endl;
+            }
+        } catch (const exception& e) {
+            cout << "Error: Invalid value for " << key << ": " << value << endl;
+            configFile.close();
+            return false;
+        }
+    }
+    
+    configFile.close();
+    
+    // Check for missing required keys
+    for (size_t i = 0; i < requiredKeys.size(); ++i) {
+        if (!keyFound[i]) {
+            missingKeys.push_back(requiredKeys[i]);
+        }
+    }
+    
+    if (!missingKeys.empty()) {
+        cout << "Error: Missing required configuration keys:" << endl;
+        for (const auto& key : missingKeys) {
+            cout << "  - " << key << endl;
+        }
+        return false;
+    }
+    
+    // Validate configuration values
+    if (!systemConfig.isValid()) {
+        cout << "Error: Invalid configuration values detected:" << endl;
+        if (systemConfig.num_cpu <= 0) cout << "  - num-cpu must be greater than 0" << endl;
+        if (systemConfig.scheduler.empty()) cout << "  - scheduler cannot be empty" << endl;
+        if (systemConfig.quantum_cycles <= 0) cout << "  - quantum-cycles must be greater than 0" << endl;
+        if (systemConfig.batch_process_freq <= 0) cout << "  - batch-process-freq must be greater than 0" << endl;
+        if (systemConfig.min_ins <= 0) cout << "  - min-ins must be greater than 0" << endl;
+        if (systemConfig.max_ins <= 0) cout << "  - max-ins must be greater than 0" << endl;
+        if (systemConfig.max_ins < systemConfig.min_ins) cout << "  - max-ins must be >= min-ins" << endl;
+        if (systemConfig.delay_per_exec < 0) cout << "  - delay-per-exec must be >= 0" << endl;
+        return false;
+    }
+    
+    return true;
 }
 
 /**
@@ -229,16 +308,23 @@ bool loadConfig() {
 void initializeSystem() {
     if (isSystemInitialized) {
         cout << "System is already initialized." << endl;
+        cout << "If you want to reinitialize with new config values, please restart the program." << endl;
         return;
     }
     
     cout << "Initializing system..." << endl;
     
-    // Load configuration
-    loadConfig();
+    // Load configuration from config.txt
+    if (!loadConfig()) {
+        cout << "\nSystem initialization failed!" << endl;
+        cout << "Please fix the config.txt file and try again." << endl;
+        return;
+    }
     
-    // Display loaded configuration
-    cout << "\nSystem Configuration:" << endl;
+    // Display successfully loaded configuration
+    cout << "\n" << string(50, '=') << endl;
+    cout << "SYSTEM CONFIGURATION LOADED SUCCESSFULLY" << endl;
+    cout << string(50, '=') << endl;
     cout << "├── Number of CPUs: " << systemConfig.num_cpu << endl;
     cout << "├── Scheduler Algorithm: " << systemConfig.scheduler << endl;
     cout << "├── Quantum Cycles: " << systemConfig.quantum_cycles << endl;
@@ -246,6 +332,7 @@ void initializeSystem() {
     cout << "├── Min Instructions: " << systemConfig.min_ins << endl;
     cout << "├── Max Instructions: " << systemConfig.max_ins << endl;
     cout << "└── Delay per Execution: " << systemConfig.delay_per_exec << " ms" << endl;
+    cout << string(50, '=') << endl;
     
     // Initialize system components
     globalProcesses.clear();
@@ -255,6 +342,7 @@ void initializeSystem() {
     cout << "\nSystem initialized successfully!" << endl;
     cout << "You can now use scheduler-start to begin process scheduling." << endl;
 }
+
 
 /**
  * Displays the Scheduler UI, showing running and finished processes.
@@ -707,6 +795,11 @@ int main() {
         else if (command == "initialize") {
             initializeSystem();
         }
+        // Check if system is initialized before allowing other commands
+        else if (!isSystemInitialized) {
+            cout << "Please initialize the OS first." << endl;
+            continue;
+        }
         else if (command == "clear") {
             if (inScreen) {
                 screens[currentScreen].display();
@@ -793,10 +886,6 @@ int main() {
             displaySchedulerUI(globalProcesses);
         }
         else if (command == "report-util") {
-            if (!isSystemInitialized) {
-                cout << "System not initialized. Please run 'initialize' first." << endl;
-                continue;
-            }
             generateUtilizationReport();
         }
         else if (!command.empty()) {
@@ -810,4 +899,5 @@ int main() {
     }
 
     return 0;
+
 }
