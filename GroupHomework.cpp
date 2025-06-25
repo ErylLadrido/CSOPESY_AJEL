@@ -458,56 +458,66 @@ void displaySchedulerUI(const vector<Process>& processes) {
  * Each worker thread simulates a CPU core. It waits for processes to be added
  * to the ready queue, picks one, and executes its tasks (print commands).
  * @param coreId The ID of the CPU core this thread represents (0 to NUM_CORES-1).
+ * * For RR scheduling:
+ * - Runs a process for up to quantum_cycles instructions
+ * - If process isn't finished, puts it back in ready queue
+ * - Sets process start time only on first execution
+ * - Updates core assignment on each execution
  */
 void cpu_worker_main(int coreId) {
     while (isSchedulerRunning) {
         Process* currentProcess = nullptr;
 
-        // --- Critical Section: Wait for and get a process from the queue ---
+        // Get process from queue
         {
             unique_lock<mutex> lock(queue_mutex);
-            // Wait until the queue is not empty OR the scheduler is stopping
-            scheduler_cv.wait(lock, [] { return !ready_queue.empty() || !isSchedulerRunning; });
+            scheduler_cv.wait(lock, [] {
+                return !ready_queue.empty() || !isSchedulerRunning;
+                });
 
-            // If the scheduler has stopped and the queue is empty, the thread can exit.
-            if (!isSchedulerRunning && ready_queue.empty()) {
-                return;
-            }
-
-            // Check again if queue is not empty before popping
+            if (!isSchedulerRunning && ready_queue.empty()) return;
             if (!ready_queue.empty()) {
                 currentProcess = ready_queue.front();
                 ready_queue.pop();
             }
-        } // The unique_lock is automatically released here.
+        }
 
-        // If a process was successfully dequeued, execute it.
-        if (currentProcess != nullptr) {
-            // --- Set process start time and assigned core ---
+        if (currentProcess) {
+            // Set start time only once
             {
                 lock_guard<mutex> lock(processMutex);
-                currentProcess->core = coreId;
-                currentProcess->startTime = time(nullptr);
+                if (currentProcess->startTime == 0) {
+                    currentProcess->startTime = time(nullptr);
+                }
+                currentProcess->core = coreId;  // Update current core
             }
 
-            // --- Execute all tasks (print commands) for the process ---
+            // Calculate how many tasks to run
+            int tasks_to_run = currentProcess->totalTasks - currentProcess->tasksCompleted;
+            if (systemConfig.scheduler == "rr") {
+                tasks_to_run = min(tasks_to_run, systemConfig.quantum_cycles);
+            }
+
+            // Open log file in append mode
             string logFileName = currentProcess->name + ".txt";
-            ofstream outfile(logFileName); // Create/overwrite the log file
+            ofstream outfile(logFileName, ios::app);
 
-            if (!outfile.is_open()) {
-                lock_guard<mutex> lock(processMutex);
-                cerr << "Error: Could not open file " << logFileName << " for writing." << endl;
-            }
-            else {
-                for (int i = 0; i < currentProcess->totalTasks; ++i) {
-                    if (!isSchedulerRunning) break; // Allow scheduler to stop mid-process
+            // Execute tasks
+            for (int i = 0; i < tasks_to_run; ++i) {
+                if (!isSchedulerRunning) break;
 
-                    this_thread::sleep_for(chrono::milliseconds(20)); // Simulate work for one task
+                // Simulate instruction execution
+                this_thread::sleep_for(
+                    chrono::milliseconds(systemConfig.delay_per_exec)
+                );
 
-                    lock_guard<mutex> lock(processMutex); // Lock for updating shared process data
+                {
+                    lock_guard<mutex> lock(processMutex);
                     currentProcess->tasksCompleted++;
+                }
 
-                    // --- Write the "print" command output to the process's log file ---
+                // Write to log
+                if (outfile.is_open()) {
                     time_t now = time(0);
                     tm localtm;
 #ifdef _WIN32
@@ -517,21 +527,28 @@ void cpu_worker_main(int coreId) {
 #endif
                     stringstream ss;
                     ss << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
-
-                    outfile << ss.str() << " Core:" << coreId << " \"Hello world from " << currentProcess->name << "!\"" << endl;
+                    outfile << ss.str() << " Core:" << coreId
+                        << " \"Hello world from " << currentProcess->name << "!\"" << endl;
                 }
             }
             outfile.close();
 
-
-            // --- Mark process as finished ---
+            // Check if process finished
+            bool finished = false;
             {
                 lock_guard<mutex> lock(processMutex);
-                // Only mark as fully finished if it completed all tasks
-                if (currentProcess->tasksCompleted == currentProcess->totalTasks) {
+                if (currentProcess->tasksCompleted >= currentProcess->totalTasks) {
                     currentProcess->endTime = time(nullptr);
                     currentProcess->isFinished = true;
+                    finished = true;
                 }
+            }
+
+            // Requeue if not finished (RR only)
+            if (!finished && systemConfig.scheduler == "rr" && isSchedulerRunning) {
+                lock_guard<mutex> lock(queue_mutex);
+                ready_queue.push(currentProcess);
+                scheduler_cv.notify_one();
             }
         }
     }
@@ -571,6 +588,39 @@ void FCFSScheduler() {
     isSchedulerRunning = false;
 }
 
+// ===================== New Scheduler Function ===================== //
+/**
+ * @brief Starts the scheduler based on configured policy
+ *
+ * - Clears and repopulates ready queue with unfinished processes
+ * - Starts worker threads
+ * - Works for both FCFS and RR
+ */
+void startScheduler() {
+    // Clear and repopulate ready queue
+    {
+        lock_guard<mutex> lock(queue_mutex);
+        while (!ready_queue.empty()) ready_queue.pop();
+
+        for (auto& proc : globalProcesses) {
+            if (!proc.isFinished) {
+                ready_queue.push(&proc);
+            }
+        }
+    }
+
+    // Start worker threads
+    cpu_workers.clear();
+    for (int i = 0; i < systemConfig.num_cpu; ++i) {
+        cpu_workers.emplace_back(cpu_worker_main, i);
+    }
+    scheduler_cv.notify_all();
+
+    // Wait for workers to finish
+    for (auto& worker : cpu_workers) {
+        if (worker.joinable()) worker.join();
+    }
+}
 
 void enableUTF8Console() {
 #ifdef _WIN32
@@ -851,20 +901,26 @@ int main() {
                 cout << "Scheduler is already running." << endl;
                 continue;
             }
-            /*
-            // --- TEST CASE: Create 10 processes, each with 100 print commands ---
-            lock_guard<mutex> lock(processMutex);
-            globalProcesses.clear();
-            for (int i = 1; i <= 10; ++i) {
-                stringstream ss;
-                ss << "process" << setfill('0') << setw(2) << i;
-                globalProcesses.push_back({ ss.str(), 0, 0, -1, 0, 100, false });
-            }*/
+
+            // Create test processes (10 processes, 100 tasks each)
+            {
+                lock_guard<mutex> lock(processMutex);
+                globalProcesses.clear();
+                for (int i = 1; i <= 10; ++i) {
+                    stringstream name;
+                    name << "process" << setfill('0') << setw(2) << i;
+                    globalProcesses.push_back({
+                        name.str(), 0, 0, -1, 0, 100, false
+                        });
+                }
+            }
 
             isSchedulerRunning = true;
-            schedulerThread = thread(FCFSScheduler);
-            cout << "Scheduler started with 10 processes on 4 cores." << endl;
-            cout << "Type 'screen -ls' to view progress or 'scheduler-stop' to stop." << endl;
+            schedulerThread = thread(startScheduler);  // Use new scheduler function
+
+            cout << "Scheduler started (" << systemConfig.scheduler
+                << ") with 10 processes on " << systemConfig.num_cpu
+                << " cores." << endl;
         }
         // == Scheduler-stop Command ==
         else if (command == "scheduler-stop") {
