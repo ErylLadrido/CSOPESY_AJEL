@@ -8,4 +8,4 @@ To Run the code. Compile GroupHomework.cpp.
 
 g++ GroupHomework.cpp -o *name of exe*
 
-Input the name of the .exe file and you should be able to run the code.
+Input the name of the .exe file and you should be able to run the code. Main function is located in GroupHomework.cpp.
