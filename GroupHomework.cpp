@@ -451,6 +451,10 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         case ProcessInstruction::PRINT:
             logFile << timestamp.str() << " Core:" << coreId << " \"" << instr.message << "\"" << endl;
             this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }            
             break;
             
         case ProcessInstruction::DECLARE:
@@ -458,6 +462,10 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name 
                    << " = " << instr.value << endl;
             this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }
             break;
             
         case ProcessInstruction::ADD:
@@ -468,9 +476,14 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.var_name 
                    << " " << instr.value << " (result: " << process->variables[instr.var_name] << ")" << endl;
             this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }
             break;
             
         case ProcessInstruction::SUBTRACT:
+            
             if (process->variables.find(instr.var_name) == process->variables.end()) {
                 process->variables[instr.var_name] = 0; // Auto-declare with 0
             }
@@ -478,10 +491,18 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             logFile << timestamp.str() << " Core:" << coreId << " SUBTRACT " << instr.var_name 
                    << " " << instr.value << " (result: " << process->variables[instr.var_name] << ")" << endl;
             this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }
             break;
             
         case ProcessInstruction::SLEEP:
             logFile << timestamp.str() << " Core:" << coreId << " SLEEP " << instr.value << endl;
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }
             // Sleep for the specified number of cycles
             for (int i = 0; i < instr.value; ++i) {
                 this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
@@ -491,6 +512,10 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             
         case ProcessInstruction::FOR_LOOP:
             logFile << timestamp.str() << " Core:" << coreId << " FOR_LOOP " << instr.loop_count << " iterations" << endl;
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }
             for (int i = 0; i < instr.loop_count; ++i) {
                 for (const auto& loopInstr : instr.loop_body) {
                     if (!executeInstruction(process, loopInstr, coreId, logFile)) {
@@ -687,7 +712,7 @@ void cpu_worker_main(int coreId) {
 
                 {
                     lock_guard<mutex> lock(processMutex);
-                    currentProcess->tasksCompleted++;
+                    //currentProcess->tasksCompleted++;
                     currentProcess->currentInstructionIndex++;
                 }
 
@@ -823,6 +848,7 @@ void displayMainMenu() {
     cout << "Hello, Welcome to AJEL OS command.net" << endl;
     cout << "Available commands:" << endl;
     cout << "  initialize          - Initialize the system with config parameters" << endl;
+    cout << "  process-smi         - Check the progress of your process" << endl;
     cout << "  screen -s <name>    - Create a new screen" << endl;
     cout << "  screen -r <name>    - Resume a screen" << endl;
     cout << "  screen -ls          - List running/finished processes" << endl;
@@ -1009,6 +1035,31 @@ int main() {
                 screens[currentScreen].display();
             } else {
                 displayMainMenu();
+            }
+        } else if (command == "process-smi") {
+            lock_guard<mutex> lock(processMutex);
+            int idx = 1;
+            for (const auto& proc : globalProcesses) {
+                cout << "\n== Process " << idx++ << " ==\n";
+                cout << "Name: " << proc.name << "\n";
+                cout << "Core: " << proc.core + 1 << "\n";
+                cout << "Progress: " << proc.tasksCompleted << " / " << proc.totalTasks << "\n";
+                cout << "Status: " << (proc.isFinished ? "Finished!" : "Running") << "\n";
+
+                cout << "-- Log Output --\n";
+                string logFileName = proc.name + ".txt";
+                ifstream infile(logFileName);
+                if (infile.is_open()) {
+                    string line;
+                    int count = 0;
+                    while (getline(infile, line) && count < 5) {
+                        cout << "  " << line << "\n";
+                        count++;
+                    }
+                    infile.close();
+                } else {
+                    cout << "  (No log found)\n";
+                }
             }
         } else if (command.rfind("screen -s ", 0) == 0) {
             if (inScreen) {
