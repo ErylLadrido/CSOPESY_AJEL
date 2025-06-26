@@ -6,14 +6,6 @@
  *   - Tiu, Lance Wilem
  */
 
-
-
-
-
-
-
-
-
 // ======================= Libraries ======================= //
 
 #ifdef _WIN32  // For UTF-8 display
@@ -68,6 +60,7 @@ struct SystemConfig {
     int max_ins;
     int delay_per_exec;
     
+    
    // Constructor - no default values, must be loaded from config
     SystemConfig() : 
         num_cpu(0), 
@@ -96,6 +89,27 @@ struct SystemConfig {
 // ===================== Structures ===================== //
 
 /**
+ * Represents a single process instruction
+ */
+struct ProcessInstruction {
+    enum Type {
+        PRINT,
+        DECLARE,
+        ADD,
+        SUBTRACT,
+        SLEEP,
+        FOR_LOOP
+    };
+    
+    Type type;
+    string var_name;     // For DECLARE, ADD, SUBTRACT
+    int value;           // For DECLARE, ADD, SUBTRACT, SLEEP
+    string message;      // For PRINT
+    vector<ProcessInstruction> loop_body; // For FOR_LOOP
+    int loop_count;      // For FOR_LOOP
+};
+
+/**
  * Defines the process structure.
  */
 struct Process {
@@ -104,8 +118,23 @@ struct Process {
     time_t endTime;
     int core; // Core that is executing or executed the process
     int tasksCompleted;
-    int totalTasks; // In this context, this is the number of "print" commands
+    int totalTasks; // Total number of instructions to execute
     bool isFinished;
+    vector<ProcessInstruction> instructions; // Process instructions
+    unordered_map<string, int> variables;   // Process variables
+
+    //TESTING
+    int currentInstructionIndex = 0; // track instruction being executed
+
+    // Constructor
+    Process(const string& processName) : 
+        name(processName), startTime(0), endTime(0), core(-1), 
+        tasksCompleted(0), totalTasks(0), isFinished(false), currentInstructionIndex(0) {}
+
+    Process()
+        : name("unnamed"), startTime(0), endTime(0), core(-1),
+          tasksCompleted(0), totalTasks(0), isFinished(false), currentInstructionIndex(0) {}
+          
 };
 
 // =================== Structures - END =================== //
@@ -344,6 +373,154 @@ void initializeSystem() {
 }
 
 
+
+/**
+ * Generate random process instructions based on config parameters
+ */
+vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int maxInstructions) {
+    vector<ProcessInstruction> instructions;
+    int totalInstructions = minInstructions + (rand() % (maxInstructions - minInstructions + 1));
+    
+    // Generate random instructions
+    for (int i = 0; i < totalInstructions; ++i) {
+        ProcessInstruction instr;
+        int instrType = rand() % 6; // 0-5 for different instruction types
+        
+        switch (instrType) {
+            case 0: // PRINT
+                instr.type = ProcessInstruction::PRINT;
+                instr.message = "Hello world from process!";
+                break;
+                
+            case 1: // DECLARE
+                instr.type = ProcessInstruction::DECLARE;
+                instr.var_name = "var" + to_string(rand() % 5 + 1); // var1-var5
+                instr.value = rand() % 100;
+                break;
+                
+            case 2: // ADD
+                instr.type = ProcessInstruction::ADD;
+                instr.var_name = "var" + to_string(rand() % 5 + 1);
+                instr.value = rand() % 50 + 1;
+                break;
+                
+            case 3: // SUBTRACT
+                instr.type = ProcessInstruction::SUBTRACT;
+                instr.var_name = "var" + to_string(rand() % 5 + 1);
+                instr.value = rand() % 50 + 1;
+                break;
+                
+            case 4: // SLEEP
+                instr.type = ProcessInstruction::SLEEP;
+                instr.value = rand() % 5 + 1; // Sleep for 1-5 cycles
+                break;
+                
+            case 5: // FOR_LOOP (simple, max 3 iterations)
+                instr.type = ProcessInstruction::FOR_LOOP;
+                instr.loop_count = rand() % 3 + 1; // 1-3 iterations
+                // Add a simple PRINT instruction inside the loop
+                ProcessInstruction loopInstr;
+                loopInstr.type = ProcessInstruction::PRINT;
+                loopInstr.message = "Loop iteration";
+                instr.loop_body.push_back(loopInstr);
+                break;
+        }
+        
+        instructions.push_back(instr);
+    }
+    
+    return instructions;
+}
+
+/**
+ * Execute a single process instruction
+ */
+bool executeInstruction(Process* process, const ProcessInstruction& instr, int coreId, ofstream& logFile) {
+    // Generate timestamp
+    time_t now = time(0);
+    tm localtm;
+#ifdef _WIN32
+    localtime_s(&localtm, &now);
+#else
+    localtm = *localtime(&now);
+#endif
+    stringstream timestamp;
+    timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
+    
+    switch (instr.type) {
+        case ProcessInstruction::PRINT:
+            logFile << timestamp.str() << " Core:" << coreId << " \"" << instr.message << "\"" << endl;
+            this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            break;
+            
+        case ProcessInstruction::DECLARE:
+            process->variables[instr.var_name] = instr.value;
+            logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name 
+                   << " = " << instr.value << endl;
+            this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            break;
+            
+        case ProcessInstruction::ADD:
+            if (process->variables.find(instr.var_name) == process->variables.end()) {
+                process->variables[instr.var_name] = 0; // Auto-declare with 0
+            }
+            process->variables[instr.var_name] += instr.value;
+            logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.var_name 
+                   << " " << instr.value << " (result: " << process->variables[instr.var_name] << ")" << endl;
+            this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            break;
+            
+        case ProcessInstruction::SUBTRACT:
+            if (process->variables.find(instr.var_name) == process->variables.end()) {
+                process->variables[instr.var_name] = 0; // Auto-declare with 0
+            }
+            process->variables[instr.var_name] -= instr.value;
+            logFile << timestamp.str() << " Core:" << coreId << " SUBTRACT " << instr.var_name 
+                   << " " << instr.value << " (result: " << process->variables[instr.var_name] << ")" << endl;
+            this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            break;
+            
+        case ProcessInstruction::SLEEP:
+            logFile << timestamp.str() << " Core:" << coreId << " SLEEP " << instr.value << endl;
+            // Sleep for the specified number of cycles
+            for (int i = 0; i < instr.value; ++i) {
+                this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+                if (!isSchedulerRunning) return false; // Allow early termination
+            }
+            break;
+            
+        case ProcessInstruction::FOR_LOOP:
+            logFile << timestamp.str() << " Core:" << coreId << " FOR_LOOP " << instr.loop_count << " iterations" << endl;
+            for (int i = 0; i < instr.loop_count; ++i) {
+                for (const auto& loopInstr : instr.loop_body) {
+                    if (!executeInstruction(process, loopInstr, coreId, logFile)) {
+                        return false; // Early termination
+                    }
+                    if (!isSchedulerRunning) return false;
+                }
+            }
+            break;
+    }
+    
+    return true;
+}
+
+/**
+ * Count total instructions (including loop iterations)
+ */
+int countTotalInstructions(const vector<ProcessInstruction>& instructions) {
+    int total = 0;
+    for (const auto& instr : instructions) {
+        if (instr.type == ProcessInstruction::FOR_LOOP) {
+            total += 1; // For the loop declaration
+            total += instr.loop_count * countTotalInstructions(instr.loop_body);
+        } else {
+            total += 1;
+        }
+    }
+    return total;
+}
+
 /**
  * Displays the Scheduler UI, showing running and finished processes.
  */
@@ -356,7 +533,7 @@ void displaySchedulerUI(const vector<Process>& processes) {
 
     displayHeader();
 
-    // Calculate CPU utilization statistics
+    // Calculate CPU utilization statistics UPDATE IT
     int totalCores = systemConfig.num_cpu;
     int coresUsed = 0;
     int runningProcesses = 0;
@@ -473,7 +650,7 @@ void cpu_worker_main(int coreId) {
             unique_lock<mutex> lock(queue_mutex);
             scheduler_cv.wait(lock, [] {
                 return !ready_queue.empty() || !isSchedulerRunning;
-                });
+            });
 
             if (!isSchedulerRunning && ready_queue.empty()) return;
             if (!ready_queue.empty()) {
@@ -492,52 +669,38 @@ void cpu_worker_main(int coreId) {
                 currentProcess->core = coreId;  // Update current core
             }
 
-            // Calculate how many tasks to run
-            int tasks_to_run = currentProcess->totalTasks - currentProcess->tasksCompleted;
-            if (systemConfig.scheduler == "rr") {
-                tasks_to_run = min(tasks_to_run, systemConfig.quantum_cycles);
-            }
-
             // Open log file in append mode
             string logFileName = currentProcess->name + ".txt";
             ofstream outfile(logFileName, ios::app);
 
-            // Execute tasks
-            for (int i = 0; i < tasks_to_run; ++i) {
+            int& index = currentProcess->currentInstructionIndex;
+            int executedInstructions = 0;
+            while (index < currentProcess->instructions.size() &&
+                   (!systemConfig.scheduler.compare("fcfs") || executedInstructions < systemConfig.quantum_cycles)) {
+
                 if (!isSchedulerRunning) break;
 
-                // Simulate instruction execution
-                this_thread::sleep_for(
-                    chrono::milliseconds(systemConfig.delay_per_exec)
-                );
+                const ProcessInstruction& instr = currentProcess->instructions[index];
+                if (!executeInstruction(currentProcess, instr, coreId, outfile)) {
+                    break;
+                }
 
                 {
                     lock_guard<mutex> lock(processMutex);
                     currentProcess->tasksCompleted++;
+                    currentProcess->currentInstructionIndex++;
                 }
 
-                // Write to log
-                if (outfile.is_open()) {
-                    time_t now = time(0);
-                    tm localtm;
-#ifdef _WIN32
-                    localtime_s(&localtm, &now);
-#else
-                    localtm = *localtime(&now);
-#endif
-                    stringstream ss;
-                    ss << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
-                    outfile << ss.str() << " Core:" << coreId
-                        << " \"Hello world from " << currentProcess->name << "!\"" << endl;
-                }
+                executedInstructions++;
             }
+
             outfile.close();
 
             // Check if process finished
             bool finished = false;
             {
                 lock_guard<mutex> lock(processMutex);
-                if (currentProcess->tasksCompleted >= currentProcess->totalTasks) {
+                if (currentProcess->currentInstructionIndex >= currentProcess->instructions.size()) {
                     currentProcess->endTime = time(nullptr);
                     currentProcess->isFinished = true;
                     finished = true;
@@ -808,14 +971,12 @@ int main() {
     enableUTF8Console();
     displayMainMenu();
 
-    // Main command loop
     while (true) {
         if (inScreen) {
             cout << "\nAJEL OS [" << currentScreen << "]> ";
-        }
+        } 
+        
         else {
-            // Display main prompt, but only if scheduler isn't running.
-            // When scheduler is active, let output from other threads show.
             if (!isSchedulerRunning) {
                 cout << "\nAJEL OS> ";
             }
@@ -827,9 +988,7 @@ int main() {
             if (inScreen) {
                 inScreen = false;
                 displayMainMenu();
-            }
-            else {
-                // If scheduler is running, stop it first.
+            } else {
                 if (isSchedulerRunning) {
                     isSchedulerRunning = false;
                     scheduler_cv.notify_all();
@@ -840,25 +999,18 @@ int main() {
                 cout << "Exiting application." << endl;
                 break;
             }
-        }
-        // == Initialize Command ==
-        else if (command == "initialize") {
+        } else if (command == "initialize") {
             initializeSystem();
-        }
-        // Check if system is initialized before allowing other commands
-        else if (!isSystemInitialized) {
+        } else if (!isSystemInitialized) {
             cout << "Please initialize the OS first." << endl;
             continue;
-        }
-        else if (command == "clear") {
+        } else if (command == "clear") {
             if (inScreen) {
                 screens[currentScreen].display();
-            }
-            else {
+            } else {
                 displayMainMenu();
             }
-        }
-        else if (command.rfind("screen -s ", 0) == 0) {
+        } else if (command.rfind("screen -s ", 0) == 0) {
             if (inScreen) {
                 cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
                 continue;
@@ -868,12 +1020,10 @@ int main() {
             if (screens.find(name) == screens.end()) {
                 screens[name] = Screen(name);
                 cout << "Screen \"" << name << "\" created." << endl;
-            }
-            else {
+            } else {
                 cout << "Screen \"" << name << "\" already exists." << endl;
             }
-        }
-        else if (command.rfind("screen -r ", 0) == 0) {
+        } else if (command.rfind("screen -r ", 0) == 0) {
             if (inScreen) {
                 cout << "Already in a screen. Type 'exit' first." << endl;
                 continue;
@@ -885,45 +1035,43 @@ int main() {
                 inScreen = true;
                 currentScreen = name;
                 it->second.display();
-            }
-            else {
+            } else {
                 cout << "Screen \"" << name << "\" not found." << endl;
             }
-        }
-        // == List Scheduler Processes Command ==
-        else if (command == "screen -ls") {
+        } else if (command == "screen -ls") {
             lock_guard<mutex> lock(processMutex);
             displaySchedulerUI(globalProcesses);
+        } else if (command == "scheduler-start") {
+        if (isSchedulerRunning) {
+            cout << "Scheduler is already running." << endl;
+            continue;
         }
-        // == Scheduler-test Command ==
-        else if (command == "scheduler-start") {
-            if (isSchedulerRunning) {
-                cout << "Scheduler is already running." << endl;
-                continue;
+
+        {
+            lock_guard<mutex> lock(processMutex);
+            globalProcesses.clear();
+
+            // Generate 10 processes with randomized instructions
+            for (int i = 1; i <= 10; ++i) {
+                stringstream name;
+                name << "process" << setfill('0') << setw(2) << i;
+
+                Process newProc(name.str());
+                newProc.instructions = generateProcessInstructions(systemConfig.min_ins, systemConfig.max_ins);
+                newProc.totalTasks = countTotalInstructions(newProc.instructions);
+                newProc.currentInstructionIndex = 0; // Make sure this member exists in Process
+
+                globalProcesses.push_back(std::move(newProc));
             }
-
-            // Create test processes (10 processes, 100 tasks each)
-            {
-                lock_guard<mutex> lock(processMutex);
-                globalProcesses.clear();
-                for (int i = 1; i <= 10; ++i) {
-                    stringstream name;
-                    name << "process" << setfill('0') << setw(2) << i;
-                    globalProcesses.push_back({
-                        name.str(), 0, 0, -1, 0, 100, false
-                        });
-                }
-            }
-
-            isSchedulerRunning = true;
-            schedulerThread = thread(startScheduler);  // Use new scheduler function
-
-            cout << "Scheduler started (" << systemConfig.scheduler
-                << ") with 10 processes on " << systemConfig.num_cpu
-                << " cores." << endl;
         }
-        // == Scheduler-stop Command ==
-        else if (command == "scheduler-stop") {
+
+        isSchedulerRunning = true;
+        schedulerThread = thread(startScheduler);
+
+        cout << "Scheduler started (" << systemConfig.scheduler
+            << ") with 10 processes on " << systemConfig.num_cpu
+            << " cores." << endl;
+    } else if (command == "scheduler-stop") {
             if (!isSchedulerRunning) {
                 cout << "Scheduler is not running." << endl;
                 continue;
@@ -931,7 +1079,7 @@ int main() {
 
             cout << "Stopping scheduler..." << endl;
             isSchedulerRunning = false;
-            scheduler_cv.notify_all(); // Wake up all waiting threads to allow them to exit
+            scheduler_cv.notify_all();
             if (schedulerThread.joinable()) {
                 schedulerThread.join();
             }
@@ -940,20 +1088,16 @@ int main() {
 
             lock_guard<mutex> lock(processMutex);
             displaySchedulerUI(globalProcesses);
-        }
-        else if (command == "report-util") {
+        } else if (command == "report-util") {
             generateUtilizationReport();
-        }
-        else if (!command.empty()) {
+        } else if (!command.empty()) {
             if (inScreen) {
-                screens[currentScreen].advance(); // Advance screen on any command
-            }
-            else {
+                screens[currentScreen].advance();
+            } else {
                 cout << "Command not recognized." << endl;
             }
         }
     }
 
     return 0;
-
 }
