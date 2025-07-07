@@ -59,9 +59,12 @@ struct SystemConfig {
     int min_ins;
     int max_ins;
     int delay_per_exec;
+    // Memory allocation parameters
+    int max_overall_mem;
+    int mem_per_frame;
+    int mem_per_proc;
     
-    
-   // Constructor - no default values, must be loaded from config
+   // Constructor
     SystemConfig() : 
         num_cpu(0), 
         scheduler(""), 
@@ -69,7 +72,10 @@ struct SystemConfig {
         batch_process_freq(0),
         min_ins(0),
         max_ins(0),
-        delay_per_exec(0) {}
+        delay_per_exec(0),
+        max_overall_mem(0),
+        mem_per_frame(0),
+        mem_per_proc(0) {}
 
     // Method to validate configuration
     bool isValid() const {
@@ -80,7 +86,13 @@ struct SystemConfig {
                min_ins > 0 && 
                max_ins > 0 && 
                max_ins >= min_ins &&
-               delay_per_exec >= 0;
+               delay_per_exec >= 0 &&
+               // New memory validation
+               max_overall_mem > 0 &&
+               mem_per_frame > 0 &&
+               mem_per_proc > 0 &&
+               mem_per_frame <= max_overall_mem &&
+               mem_per_proc <= max_overall_mem;
     }
 } systemConfig;
 
@@ -233,7 +245,9 @@ bool loadConfig() {
     string line;
     vector<string> missingKeys;
     vector<string> requiredKeys = {"num-cpu", "scheduler", "quantum-cycles", 
-                                   "batch-process-freq", "min-ins", "max-ins", "delay-per-exec"};
+                                   "batch-process-freq", "min-ins", "max-ins", "delay-per-exec",
+                                    // New required keys
+                                    "max-overall-mem", "mem-per-frame", "mem-per-proc"};
     vector<bool> keyFound(requiredKeys.size(), false);
     
     cout << "Reading configuration from config.txt..." << endl;
@@ -287,8 +301,20 @@ bool loadConfig() {
                 systemConfig.delay_per_exec = stoi(value);
                 keyFound[6] = true;
                 cout << "  ✓ delay-per-exec: " << systemConfig.delay_per_exec << " ms" << endl;
+            } else if (key == "max-overall-mem") {
+                systemConfig.max_overall_mem = stoi(value);
+                keyFound[7] = true;
+                cout << "  ✓ max-overall-mem: " << systemConfig.max_overall_mem << endl;
+            } else if (key == "mem-per-frame") {
+                systemConfig.mem_per_frame = stoi(value);
+                keyFound[8] = true;
+                cout << "  ✓ mem-per-frame: " << systemConfig.mem_per_frame << endl;
+            } else if (key == "mem-per-proc") {
+                systemConfig.mem_per_proc = stoi(value);
+                keyFound[9] = true;
+                cout << "  ✓ mem-per-proc: " << systemConfig.mem_per_proc << endl;
             } else {
-                cout << "Warning: Unknown configuration key ignored: " << key << endl;
+                    cout << "Warning: Unknown configuration key ignored: " << key << endl;
             }
         } catch (const exception& e) {
             cout << "Error: Invalid value for " << key << ": " << value << endl;
@@ -360,7 +386,11 @@ void initializeSystem() {
     cout << "├── Batch Process Frequency: " << systemConfig.batch_process_freq << endl;
     cout << "├── Min Instructions: " << systemConfig.min_ins << endl;
     cout << "├── Max Instructions: " << systemConfig.max_ins << endl;
-    cout << "└── Delay per Execution: " << systemConfig.delay_per_exec << " ms" << endl;
+    cout << "├── Delay per Execution: " << systemConfig.delay_per_exec << " ms" << endl;
+    // Display memory parameters
+    cout << "├── Max Overall Memory: " << systemConfig.max_overall_mem << " KB" << endl;
+    cout << "├── Memory per Frame: " << systemConfig.mem_per_frame << " KB" << endl;
+    cout << "└── Memory per Process: " << systemConfig.mem_per_proc << " KB" << endl;
     cout << string(50, '=') << endl;
     
     // Initialize system components
