@@ -25,6 +25,7 @@
 #include <fstream>  // For file I/O (ofstream)
 #include <queue>    // For the ready queue of processes
 #include <condition_variable> // For thread synchronization
+#include <algorithm>
 
 
 // ===================== Libraries - END ===================== //
@@ -57,6 +58,7 @@ condition_variable memory_cv; // Notifies the admission scheduler about freed me
 queue<struct Process*> waiting_for_memory_queue; // Processes waiting for memory allocation
 mutex waiting_queue_mutex;
 
+int quantumCycleCounter = 0;
 
 // --- Configuration Variables ---
 struct SystemConfig {
@@ -233,6 +235,60 @@ public:
 // =================== Classes - END =================== //
 
 // ===================== Functions ===================== //
+
+
+void generateMemorySnapshot(int quantumCycle) {
+    time_t now = time(0);
+    tm localtm;
+#ifdef _WIN32
+    localtime_s(&localtm, &now);
+#else
+    localtm = *localtime(&now);
+#endif
+    stringstream timestamp;
+    timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S%p)");
+
+    vector<tuple<int, string, int>> memoryLayout;
+    int nextAddress = 0;
+
+    {
+        lock_guard<mutex> lock(processMutex);
+        for (const auto& proc : globalProcesses) {
+            if (!proc.isFinished && proc.startTime != 0) {
+                int start = nextAddress;
+                int end = start + systemConfig.mem_per_proc;
+                memoryLayout.emplace_back(end, proc.name, start);
+                nextAddress = end;
+            }
+        }
+    }
+
+    int totalExternalFragmentation = systemConfig.max_overall_mem - nextAddress;
+
+    stringstream filename;
+    filename << "memory_stamp_" << setfill('0') << setw(2) << quantumCycle << ".txt";
+    ofstream outfile(filename.str());
+    if (!outfile.is_open()) return;
+
+    outfile << "Timestamp: " << timestamp.str() << endl;
+    outfile << "Number of processes in memory: " << memoryLayout.size() << endl;
+    outfile << "Total external fragmentation in KB: " << totalExternalFragmentation << endl;
+    outfile << "----end---- = " << systemConfig.max_overall_mem << endl;
+
+    sort(memoryLayout.begin(), memoryLayout.end(), [](const tuple<int, string, int>& a, const tuple<int, string, int>& b) {
+    return get<0>(a) > get<0>(b); // Sort by end address in descending order
+    });
+
+    for (const auto& [end, name, start] : memoryLayout) {
+        outfile << end << endl;
+        outfile << name << endl;
+        outfile << start << endl;
+    }
+
+    outfile << "----start-- = 0" << endl;
+    outfile.close();
+}
+
 
 /**
  * Load configuration from config.txt file
@@ -789,6 +845,7 @@ void cpu_worker_main(int coreId) {
                 }
 
                 executedInstructions++;
+                generateMemorySnapshot(quantumCycleCounter++);
             }
 
             outfile.close();
@@ -1077,6 +1134,7 @@ void generateUtilizationReport() {
 
     cout << "System status report generated and saved to csopesy-log.txt" << endl;
 }
+
 // =================== Functions - END =================== //
 
 // ===================== Main ===================== //
