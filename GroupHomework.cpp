@@ -175,13 +175,21 @@ public:
     string name;
     int currentLine;
     int totalLines;
+    int memorySize;  // Memory allocated to the process in bytes
     string timestamp;
+    
+private:
+    bool memoryViolation;        // Flag indicating if memory violation occurred
+    string violationTime;        // Time when violation occurred (HH:MM:SS format)
+    string violationAddress;     // Hex address that caused the violation
 
+public:
     // Default constructor
-    Screen() : name(""), totalLines(100), currentLine(1) {}
+    Screen() : name(""), totalLines(100), currentLine(1), memorySize(64), memoryViolation(false) {}
 
-    Screen(const string& name, int totalLines = 100)
-        : name(name), currentLine(1), totalLines(totalLines) {
+    // Updated constructor to include memory allocation
+    Screen(const string& name, int memorySize, int totalLines = 100)
+        : name(name), currentLine(1), totalLines(totalLines), memorySize(memorySize), memoryViolation(false) {
         time_t now = time(0);
         tm localtm;
 #ifdef _WIN32
@@ -205,6 +213,9 @@ public:
 
         cout << "┌──────────────────────────────────────────────────────────────┐\n";
         cout << "│ Process: " << left << setw(52) << name.substr(0, 52) << "│\n";
+        cout << "├──────────────────────────────────────────────────────────────┤\n";
+        cout << "│ Memory Allocated: " << setw(6) << memorySize << " bytes"
+            << setw(24) << " " << "│\n";
         cout << "├──────────────────────────────────────────────────────────────┤\n";
         cout << "│ Current Instruction Line: " << setw(6) << currentLine
             << " of " << setw(6) << totalLines
@@ -230,8 +241,54 @@ public:
         if (currentLine < totalLines)
             currentLine++;
     }
-};
 
+    // Getter for memory size
+    int getMemorySize() const {
+        return memorySize;
+    }
+
+    // Memory violation related methods
+    bool hasMemoryViolation() const {
+        return memoryViolation;
+    }
+
+    string getViolationTime() const {
+        return violationTime;
+    }
+
+    string getViolationAddress() const {
+        return violationAddress;
+    }
+
+    // Method to trigger a memory access violation
+    void triggerMemoryViolation(const string& hexAddress) {
+        memoryViolation = true;
+        violationAddress = hexAddress;
+        
+        // Get current time in HH:MM:SS format
+        time_t now = time(0);
+        tm localtm;
+#ifdef _WIN32
+        localtime_s(&localtm, &now);
+#else
+        localtm = *localtime(&now);
+#endif
+        stringstream ss;
+        ss << put_time(&localtm, "%H:%M:%S");
+        violationTime = ss.str();
+    }
+
+    // Method to simulate a random memory violation (for testing purposes)
+    void simulateMemoryViolation() {
+        // Generate a random hex address outside the allocated memory range
+        srand(time(nullptr));
+        int invalidAddress = memorySize + (rand() % 1000) + 1;
+        
+        stringstream ss;
+        ss << "0x" << hex << uppercase << invalidAddress;
+        triggerMemoryViolation(ss.str());
+    }
+};
 // =================== Classes - END =================== //
 
 // ===================== Functions ===================== //
@@ -977,16 +1034,16 @@ void displayMainMenu() {
     displayHeader();
     cout << "Hello, Welcome to AJEL OS command.net" << endl;
     cout << "Available commands:" << endl;
-    cout << "  initialize          - Initialize the system with config parameters" << endl;
-    cout << "  process-smi         - Check the progress of your process" << endl;
-    cout << "  screen -s <name>    - Create a new screen" << endl;
-    cout << "  screen -r <name>    - Resume a screen" << endl;
-    cout << "  screen -ls          - List running/finished processes and system status" << endl;
-    cout << "  scheduler-start     - Start the scheduler" << endl;
-    cout << "  scheduler-stop      - Stop the scheduler" << endl;
-    cout << "  report-util         - Generate CPU and memory utilization report" << endl;
-    cout << "  clear               - Clear the screen" << endl;
-    cout << "  exit                - Exit the program" << endl;
+    cout << "  initialize                   - Initialize the system with config parameters" << endl;
+    cout << "  process-smi                  - Check the progress of your process" << endl;
+    cout << "  screen -s <name> <memory>    - Create a new screen and declare memory allocation" << endl;
+    cout << "  screen -r <name>             - Resume a screen" << endl;
+    cout << "  screen -ls                   - List running/finished processes and system status" << endl;
+    cout << "  scheduler-start              - Start the scheduler" << endl;
+    cout << "  scheduler-stop               - Stop the scheduler" << endl;
+    cout << "  report-util                  - Generate CPU and memory utilization report" << endl;
+    cout << "  clear                        - Clear the screen" << endl;
+    cout << "  exit                         - Exit the program" << endl;
 }
 
 /**
@@ -1225,38 +1282,86 @@ int main() {
                 }
             }
         }
-        else if (command.rfind("screen -s ", 0) == 0) {
-            if (inScreen) {
-                cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
-                continue;
-            }
+            else if (command.rfind("screen -s ", 0) == 0) {
+                if (inScreen) {
+                    cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
+                    continue;
+                }
 
-            string name = command.substr(10);
-            if (screens.find(name) == screens.end()) {
-                screens[name] = Screen(name);
-                cout << "Screen \"" << name << "\" created." << endl;
+                // Parse the command to extract process name and memory size
+                string params = command.substr(10); // Remove "screen -s "
+                istringstream iss(params);
+                string name;
+                string memorySizeStr;
+                
+                // Extract process name and memory size
+                if (!(iss >> name >> memorySizeStr)) {
+                    cout << "Usage: screen -s <process_name> <process_memory_size>" << endl;
+                    continue;
+                }
+                
+                // Convert memory size string to integer
+                int memorySize;
+                try {
+                    memorySize = stoi(memorySizeStr);
+                } catch (const invalid_argument& e) {
+                    cout << "Invalid memory allocation" << endl;
+                    continue;
+                } catch (const out_of_range& e) {
+                    cout << "Invalid memory allocation" << endl;
+                    continue;
+                }
+                
+                // Validate memory size is within range [2^6, 2^16] = [64, 65536]
+                if (memorySize < 64 || memorySize > 65536) {
+                    cout << "Invalid memory allocation" << endl;
+                    continue;
+                }
+                
+                // Validate memory size is a power of 2
+                bool isPowerOfTwo = (memorySize & (memorySize - 1)) == 0;
+                if (!isPowerOfTwo) {
+                    cout << "Invalid memory allocation" << endl;
+                    continue;
+                }
+                
+                // Check if screen already exists
+                if (screens.find(name) == screens.end()) {
+                    screens[name] = Screen(name, memorySize);
+                    cout << "Screen \"" << name << "\" created with " << memorySize << " bytes allocated." << endl;
+                }
+                else {
+                    cout << "Screen \"" << name << "\" already exists." << endl;
+                }
             }
-            else {
-                cout << "Screen \"" << name << "\" already exists." << endl;
-            }
-        }
-        else if (command.rfind("screen -r ", 0) == 0) {
-            if (inScreen) {
-                cout << "Already in a screen. Type 'exit' first." << endl;
-                continue;
-            }
+            else if (command.rfind("screen -r ", 0) == 0) {
+                if (inScreen) {
+                    cout << "Already in a screen. Type 'exit' first." << endl;
+                    continue;
+                }
 
-            string name = command.substr(10);
-            auto it = screens.find(name);
-            if (it != screens.end()) {
-                inScreen = true;
-                currentScreen = name;
-                it->second.display();
+                string name = command.substr(10);
+                auto it = screens.find(name);
+                
+                if (it == screens.end()) {
+                    cout << "Process " << name << " not found." << endl;
+                }
+                else {
+                    Screen& screen = it->second;
+                    
+                    // Check if process has memory access violation
+                    if (screen.hasMemoryViolation()) {
+                        cout << "Process " << name << " shut down due to memory access violation error that occurred at " 
+                            << screen.getViolationTime() << ". " << screen.getViolationAddress() << " invalid." << endl;
+                    }
+                    else {
+                        // Normal screen access
+                        inScreen = true;
+                        currentScreen = name;
+                        screen.display();
+                    }
+                }
             }
-            else {
-                cout << "Screen \"" << name << "\" not found." << endl;
-            }
-        }
         else if (command == "screen -ls") {
             displaySchedulerUI(globalProcesses);
         }
@@ -1327,7 +1432,17 @@ int main() {
         }
         else if (command == "report-util") {
             generateUtilizationReport();
-        }
+        }/*
+        else if (command.rfind("crash ", 0) == 0) {
+            string name = command.substr(6);
+            auto it = screens.find(name);
+            if (it != screens.end()) {
+                it->second.simulateMemoryViolation();
+                cout << "Simulated memory violation for process " << name << endl;
+            } else {
+                cout << "Process " << name << " not found." << endl;
+            }
+        }*/
         else if (!command.empty()) {
             if (inScreen) {
                 screens[currentScreen].advance();
