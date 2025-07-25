@@ -26,6 +26,7 @@
 #include <queue>    // For the ready queue of processes
 #include <condition_variable> // For thread synchronization
 #include <algorithm>
+#include <cstdint> // For uint16_t
 
 
 // ===================== Libraries - END ===================== //
@@ -34,6 +35,9 @@ using namespace std;
 
 void displayHeader();
 void displayMainMenu();
+// === [NEW] === Forward declaration for the instruction parser
+bool parseInstructionsString(const string& raw_instructions, vector<struct ProcessInstruction>& instructions);
+
 
 // ======================= Global Variables ======================= //
 
@@ -45,6 +49,11 @@ vector<thread> cpu_workers;
 mutex processMutex; // Used for protecting shared resources like globalProcesses and cout
 vector<struct Process> globalProcesses; // List of all processes
 bool screenActive = false;
+
+// === [NEW] === Added mutex for the screens map to allow access from worker threads
+mutex screensMutex;
+unordered_map<string, class Screen> screens;
+
 
 // --- Threading & Scheduling Variables ---
 queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
@@ -116,20 +125,16 @@ struct SystemConfig {
  */
 struct ProcessInstruction {
     enum Type {
-        PRINT,
-        DECLARE,
-        ADD,
-        SUBTRACT,
-        SLEEP,
-        FOR_LOOP
+        PRINT, DECLARE, ADD, SUBTRACT, SLEEP, FOR_LOOP, READ, WRITE
     };
 
-    Type type;
-    string var_name;     // For DECLARE, ADD, SUBTRACT
-    int value;           // For DECLARE, ADD, SUBTRACT, SLEEP
-    string message;      // For PRINT
-    vector<ProcessInstruction> loop_body; // For FOR_LOOP
-    int loop_count;      // For FOR_LOOP
+    Type type{}; // FIX: Initialize the enum
+    string var_name;
+    int value = 0;
+    string message;
+    vector<ProcessInstruction> loop_body;
+    int loop_count = 0;
+    int memory_address = 0;
 };
 
 /**
@@ -144,20 +149,26 @@ struct Process {
     int totalTasks; // Total number of instructions to execute
     bool isFinished;
     vector<ProcessInstruction> instructions; // Process instructions
-    unordered_map<string, int> variables;   // Process variables
+    unordered_map<string, int> variables;   // Process variables (Symbol Table)
 
-    //TESTING
+    // === [NEW] === Memory and violation tracking members
+    int memorySize; // Process-specific memory allocation
+    unordered_map<int, uint16_t> memory_space; // Emulated memory space
+    bool has_violation;
+    string violation_address;
+
     int currentInstructionIndex = 0; // track instruction being executed
 
-    // Constructor
-    Process(const string& processName) :
-        name(processName), startTime(0), endTime(0), core(-1),
-        tasksCompleted(0), totalTasks(0), isFinished(false), currentInstructionIndex(0) {
+    // === [MODIFIED] === Updated constructor to include memory size
+    Process(const string& processName, int memSize) :
+        name(processName), memorySize(memSize), startTime(0), endTime(0), core(-1),
+        tasksCompleted(0), totalTasks(0), isFinished(false), has_violation(false), currentInstructionIndex(0) {
     }
 
+    // === [MODIFIED] === Updated default constructor
     Process()
-        : name("unnamed"), startTime(0), endTime(0), core(-1),
-        tasksCompleted(0), totalTasks(0), isFinished(false), currentInstructionIndex(0) {
+        : name("unnamed"), memorySize(0), startTime(0), endTime(0), core(-1),
+        tasksCompleted(0), totalTasks(0), isFinished(false), has_violation(false), currentInstructionIndex(0) {
     }
 
 };
@@ -177,7 +188,7 @@ public:
     int totalLines;
     int memorySize;  // Memory allocated to the process in bytes
     string timestamp;
-    
+
 private:
     bool memoryViolation;        // Flag indicating if memory violation occurred
     string violationTime;        // Time when violation occurred (HH:MM:SS format)
@@ -219,20 +230,20 @@ public:
         cout << "├──────────────────────────────────────────────────────────────┤\n";
         cout << "│ Current Instruction Line: " << setw(6) << currentLine
             << " of " << setw(6) << totalLines
-            << " (" << setw(3) << (currentLine * 100 / totalLines) << "%)      │\n";
+            << " (" << setw(3) << (totalLines > 0 ? (currentLine * 100 / totalLines) : 0) << "%)      │\n";
         cout << "├──────────────────────────────────────────────────────────────┤\n";
         cout << "│ Timestamp: " << left << setw(53) << timestamp << "│\n";
         cout << "└──────────────────────────────────────────────────────────────┘\n";
 
         cout << "\nProgress:\n[";
         int progressWidth = 50;
-        int pos = progressWidth * currentLine / totalLines;
+        int pos = (totalLines > 0) ? (progressWidth * currentLine / totalLines) : 0;
         for (int i = 0; i < progressWidth; ++i) {
             if (i < pos) cout << "=";
             else if (i == pos) cout << ">";
             else cout << " ";
         }
-        cout << "] " << (currentLine * 100 / totalLines) << "%\n";
+        cout << "] " << (totalLines > 0 ? (currentLine * 100 / totalLines) : 0) << "%\n";
 
         cout << "\nType \"exit\" to return to main menu" << endl;
     }
@@ -264,7 +275,7 @@ public:
     void triggerMemoryViolation(const string& hexAddress) {
         memoryViolation = true;
         violationAddress = hexAddress;
-        
+
         // Get current time in HH:MM:SS format
         time_t now = time(0);
         tm localtm;
@@ -281,9 +292,9 @@ public:
     // Method to simulate a random memory violation (for testing purposes)
     void simulateMemoryViolation() {
         // Generate a random hex address outside the allocated memory range
-        srand(time(nullptr));
+        srand(static_cast<unsigned int>(time(nullptr)));
         int invalidAddress = memorySize + (rand() % 1000) + 1;
-        
+
         stringstream ss;
         ss << "0x" << hex << uppercase << invalidAddress;
         triggerMemoryViolation(ss.str());
@@ -313,7 +324,7 @@ void generateMemorySnapshot(int quantumCycle) {
         for (const auto& proc : globalProcesses) {
             if (!proc.isFinished && proc.startTime != 0) {
                 int start = nextAddress;
-                int end = start + systemConfig.mem_per_proc;
+                int end = start + proc.memorySize; // Use process-specific memory size
                 memoryLayout.emplace_back(end, proc.name, start);
                 nextAddress = end;
             }
@@ -333,8 +344,8 @@ void generateMemorySnapshot(int quantumCycle) {
     outfile << "----end---- = " << systemConfig.max_overall_mem << endl;
 
     sort(memoryLayout.begin(), memoryLayout.end(), [](const tuple<int, string, int>& a, const tuple<int, string, int>& b) {
-    return get<0>(a) > get<0>(b); // Sort by end address in descending order
-    });
+        return get<0>(a) > get<0>(b); // Sort by end address in descending order
+        });
 
     for (const auto& [end, name, start] : memoryLayout) {
         outfile << end << endl;
@@ -454,7 +465,7 @@ bool loadConfig() {
                 cout << "Warning: Unknown configuration key ignored: " << key << endl;
             }
         }
-        catch (const exception& e) {
+        catch (const exception) {
             cout << "Error: Invalid value for " << key << ": " << value << endl;
             configFile.close();
             return false;
@@ -552,7 +563,8 @@ vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int 
     // Generate random instructions
     for (int i = 0; i < totalInstructions; ++i) {
         ProcessInstruction instr;
-        int instrType = rand() % 6; // 0-5 for different instruction types
+        // === [MODIFIED] === Added READ/WRITE to random instruction generation
+        int instrType = rand() % 8; // 0-7 for different instruction types
 
         switch (instrType) {
         case 0: // PRINT
@@ -562,19 +574,19 @@ vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int 
 
         case 1: // DECLARE
             instr.type = ProcessInstruction::DECLARE;
-            instr.var_name = "var" + to_string(rand() % 5 + 1); // var1-var5
+            instr.var_name = "var" + to_string(rand() % 10 + 1); // var1-var10
             instr.value = rand() % 100;
             break;
 
         case 2: // ADD
             instr.type = ProcessInstruction::ADD;
-            instr.var_name = "var" + to_string(rand() % 5 + 1);
+            instr.var_name = "var" + to_string(rand() % 10 + 1);
             instr.value = rand() % 50 + 1;
             break;
 
         case 3: // SUBTRACT
             instr.type = ProcessInstruction::SUBTRACT;
-            instr.var_name = "var" + to_string(rand() % 5 + 1);
+            instr.var_name = "var" + to_string(rand() % 10 + 1);
             instr.value = rand() % 50 + 1;
             break;
 
@@ -583,7 +595,7 @@ vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int 
             instr.value = rand() % 5 + 1; // Sleep for 1-5 cycles
             break;
 
-        case 5: // FOR_LOOP (simple, max 3 iterations)
+        case 5: { // FOR_LOOP (simple, max 3 iterations)
             instr.type = ProcessInstruction::FOR_LOOP;
             instr.loop_count = rand() % 3 + 1; // 1-3 iterations
             // Add a simple PRINT instruction inside the loop
@@ -591,6 +603,30 @@ vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int 
             loopInstr.type = ProcessInstruction::PRINT;
             loopInstr.message = "Loop iteration";
             instr.loop_body.push_back(loopInstr);
+            break;
+        } // <--- Closing brace for the new scope
+
+            // === [NEW] === Logic for generating READ/WRITE instructions
+        case 6: {// READ
+            instr.type = ProcessInstruction::READ;
+            instr.var_name = "var" + to_string(rand() % 10 + 1);
+            // Generate a random address within a 1KB space for testing
+            instr.memory_address = rand() % 1024;
+            break;
+        }
+        case 7: // WRITE
+            instr.type = ProcessInstruction::WRITE;
+            // First, ensure a variable is declared to write from it
+            {
+                ProcessInstruction decl_instr;
+                decl_instr.type = ProcessInstruction::DECLARE;
+                decl_instr.var_name = "write_var" + to_string(rand() % 5);
+                decl_instr.value = rand() % 500;
+                instructions.push_back(decl_instr);
+                // Now setup the WRITE instruction
+                instr.var_name = decl_instr.var_name;
+            }
+            instr.memory_address = rand() % 1024;
             break;
         }
 
@@ -615,6 +651,7 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     stringstream timestamp;
     timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
 
+    // === [MODIFIED] === Added logic for new instructions and symbol table limit
     switch (instr.type) {
     case ProcessInstruction::PRINT:
         logFile << timestamp.str() << " Core:" << coreId << " \"" << instr.message << "\"" << endl;
@@ -626,13 +663,19 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         break;
 
     case ProcessInstruction::DECLARE:
-        process->variables[instr.var_name] = instr.value;
-        logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name
-            << " = " << instr.value << endl;
-        this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
-        {
-            lock_guard<mutex> lock(processMutex);
-            process->tasksCompleted++;
+        // Spec: Symbol table has fixed size of 64 bytes for max 32 variables.
+        if (process->variables.size() >= 32) {
+            logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name << " ignored. Symbol table full." << endl;
+        }
+        else {
+            process->variables[instr.var_name] = instr.value;
+            logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name
+                << " = " << instr.value << endl;
+            this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+            {
+                lock_guard<mutex> lock(processMutex);
+                process->tasksCompleted++;
+            }
         }
         break;
 
@@ -693,6 +736,73 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             }
         }
         break;
+
+        // === [NEW] === Execution logic for READ and WRITE
+    case ProcessInstruction::READ: {
+        // Spec: check symbol table limit before adding a new variable via READ
+        if (process->variables.find(instr.var_name) == process->variables.end() && process->variables.size() >= 32) {
+            logFile << timestamp.str() << " Core:" << coreId << " READ into " << instr.var_name << " ignored. Symbol table full." << endl;
+            break; // Don't execute, don't count as a completed task
+        }
+
+        // Check for memory access violation
+        if (instr.memory_address < 0 || instr.memory_address >= process->memorySize) {
+            process->isFinished = true;
+            process->has_violation = true;
+            stringstream ss;
+            ss << "0x" << hex << uppercase << instr.memory_address;
+            process->violation_address = ss.str();
+            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on READ at " << process->violation_address << ". Process terminated." << endl;
+            return false; // Stop execution for this process
+        }
+
+        // Read value. Spec: returns 0 if uninitialized.
+        uint16_t value_read = 0;
+        if (process->memory_space.count(instr.memory_address)) {
+            value_read = process->memory_space.at(instr.memory_address);
+        }
+        process->variables[instr.var_name] = value_read;
+        logFile << timestamp.str() << " Core:" << coreId << " READ " << instr.var_name << " from 0x" << hex << instr.memory_address << " (Value: " << dec << value_read << ")" << endl;
+        this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+        {
+            lock_guard<mutex> lock(processMutex);
+            process->tasksCompleted++;
+        }
+        break;
+    }
+
+    case ProcessInstruction::WRITE: {
+        // Check if source variable exists
+        if (process->variables.find(instr.var_name) == process->variables.end()) {
+            logFile << timestamp.str() << " Core:" << coreId << " WRITE failed. Source variable '" << instr.var_name << "' not declared." << endl;
+            break; // Skip instruction
+        }
+
+        // Check for memory access violation
+        if (instr.memory_address < 0 || instr.memory_address >= process->memorySize) {
+            process->isFinished = true;
+            process->has_violation = true;
+            stringstream ss;
+            ss << "0x" << hex << uppercase << instr.memory_address;
+            process->violation_address = ss.str();
+            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on WRITE at " << process->violation_address << ". Process terminated." << endl;
+            return false; // Stop execution for this process
+        }
+
+        int value_from_var = process->variables.at(instr.var_name);
+        // Spec: Clamp value to uint16 range (0, 65535)
+        uint16_t value_to_write = static_cast<uint16_t>(max(0, min(value_from_var, 65535)));
+
+        process->memory_space[instr.memory_address] = value_to_write;
+        logFile << timestamp.str() << " Core:" << coreId << " WRITE " << dec << value_to_write << " to 0x" << hex << instr.memory_address << endl;
+        this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+        {
+            lock_guard<mutex> lock(processMutex);
+            process->tasksCompleted++;
+        }
+        break;
+    }
+
     }
 
     return true;
@@ -809,7 +919,7 @@ void displaySchedulerUI(const vector<Process>& processes) {
         for (const auto& p : processes) {
             if (!p.isFinished && p.startTime == 0) {
                 cout << left << setw(12) << p.name;
-                cout << " (Requires: " << systemConfig.mem_per_proc << " KB)" << endl;
+                cout << " (Requires: " << p.memorySize << " KB)" << endl;
             }
         }
     }
@@ -834,7 +944,13 @@ void displaySchedulerUI(const vector<Process>& processes) {
                 cout << left << setw(12) << p.name << " (";
                 cout << setw(25) << ss.str() << ")";
                 cout << right << setw(8) << "Core: " << p.core;
-                cout << right << setw(12) << "Finished";
+                // === [MODIFIED] === Display memory violation status
+                if (p.has_violation) {
+                    cout << right << setw(12) << "VIOLATION";
+                }
+                else {
+                    cout << right << setw(12) << "Finished";
+                }
                 cout << setw(8) << p.tasksCompleted << " / " << p.totalTasks << endl;
             }
         }
@@ -893,6 +1009,7 @@ void cpu_worker_main(int coreId) {
 
                 const ProcessInstruction& instr = currentProcess->instructions[index];
                 if (!executeInstruction(currentProcess, instr, coreId, outfile)) {
+                    // Instruction caused termination (e.g., memory violation)
                     break;
                 }
 
@@ -911,10 +1028,19 @@ void cpu_worker_main(int coreId) {
             bool finished = false;
             {
                 lock_guard<mutex> lock(processMutex);
-                if (currentProcess->currentInstructionIndex >= currentProcess->instructions.size()) {
+                // A process is finished if its instruction index is out of bounds OR it has a violation
+                if (currentProcess->currentInstructionIndex >= currentProcess->instructions.size() || currentProcess->has_violation) {
                     currentProcess->endTime = time(nullptr);
                     currentProcess->isFinished = true;
                     finished = true;
+
+                    // === [NEW] === If a violation occurred, update the associated Screen object for Eryl's task
+                    if (currentProcess->has_violation) {
+                        lock_guard<mutex> screen_lock(screensMutex);
+                        if (screens.count(currentProcess->name)) {
+                            screens.at(currentProcess->name).triggerMemoryViolation(currentProcess->violation_address);
+                        }
+                    }
                 }
             }
 
@@ -922,7 +1048,7 @@ void cpu_worker_main(int coreId) {
             if (finished) {
                 {
                     lock_guard<mutex> mem_lock(memory_mutex);
-                    current_memory_used -= systemConfig.mem_per_proc;
+                    current_memory_used -= currentProcess->memorySize;
                 }
                 memory_cv.notify_one(); // Signal that memory has been freed
             }
@@ -954,30 +1080,36 @@ void admissionScheduler() {
     while (isSchedulerRunning) {
         unique_lock<mutex> lock(memory_mutex);
 
-        // Wait until memory is freed OR the scheduler is stopped.
+        // === [MODIFIED] === Admission logic now checks process-specific memory size
         memory_cv.wait(lock, [] {
-            bool can_admit = !waiting_for_memory_queue.empty() &&
-                (current_memory_used + systemConfig.mem_per_proc <= systemConfig.max_overall_mem);
+            if (waiting_for_memory_queue.empty()) return !isSchedulerRunning;
+            Process* next_proc = waiting_for_memory_queue.front();
+            bool can_admit = (current_memory_used + next_proc->memorySize <= systemConfig.max_overall_mem);
             return can_admit || !isSchedulerRunning;
             });
 
         if (!isSchedulerRunning) break;
 
         // Admit all possible processes while memory is available
-        while (!waiting_for_memory_queue.empty() &&
-            (current_memory_used + systemConfig.mem_per_proc <= systemConfig.max_overall_mem)) {
-
+        while (!waiting_for_memory_queue.empty()) {
             Process* proc_to_admit = nullptr;
             {
+                // Check memory requirement before locking the waiting queue
                 lock_guard<mutex> wait_lock(waiting_queue_mutex);
                 if (!waiting_for_memory_queue.empty()) {
-                    proc_to_admit = waiting_for_memory_queue.front();
-                    waiting_for_memory_queue.pop();
+                    Process* next_proc = waiting_for_memory_queue.front();
+                    if (current_memory_used + next_proc->memorySize <= systemConfig.max_overall_mem) {
+                        proc_to_admit = next_proc;
+                        waiting_for_memory_queue.pop();
+                    }
+                    else {
+                        break; // Not enough memory for the next process, so stop trying
+                    }
                 }
             }
 
             if (proc_to_admit) {
-                current_memory_used += systemConfig.mem_per_proc;
+                current_memory_used += proc_to_admit->memorySize;
 
                 {
                     lock_guard<mutex> ready_lock(queue_mutex);
@@ -1034,16 +1166,18 @@ void displayMainMenu() {
     displayHeader();
     cout << "Hello, Welcome to AJEL OS command.net" << endl;
     cout << "Available commands:" << endl;
-    cout << "  initialize                   - Initialize the system with config parameters" << endl;
-    cout << "  process-smi                  - Check the progress of your process" << endl;
-    cout << "  screen -s <name> <memory>    - Create a new screen and declare memory allocation" << endl;
-    cout << "  screen -r <name>             - Resume a screen" << endl;
-    cout << "  screen -ls                   - List running/finished processes and system status" << endl;
-    cout << "  scheduler-start              - Start the scheduler" << endl;
-    cout << "  scheduler-stop               - Stop the scheduler" << endl;
-    cout << "  report-util                  - Generate CPU and memory utilization report" << endl;
-    cout << "  clear                        - Clear the screen" << endl;
-    cout << "  exit                         - Exit the program" << endl;
+    cout << "  initialize                         - Initialize the system with config parameters" << endl;
+    cout << "  process-smi                        - Check the progress of your process" << endl;
+    cout << "  screen -s <name> <memory>          - Create a new screen and declare memory allocation" << endl;
+    // === [NEW] === Added screen -c to help menu
+    cout << "  screen -c <name> <mem> \"<instr>\"   - Create a process with user-defined instructions" << endl;
+    cout << "  screen -r <name>                   - Resume a screen" << endl;
+    cout << "  screen -ls                         - List running/finished processes and system status" << endl;
+    cout << "  scheduler-start                    - Start the scheduler" << endl;
+    cout << "  scheduler-stop                     - Stop the scheduler" << endl;
+    cout << "  report-util                        - Generate CPU and memory utilization report" << endl;
+    cout << "  clear                              - Clear the screen" << endl;
+    cout << "  exit                               - Exit the program" << endl;
 }
 
 /**
@@ -1151,7 +1285,7 @@ void generateUtilizationReport() {
         for (const auto& p : globalProcesses) {
             if (!p.isFinished && p.startTime == 0) {
                 reportFile << left << setw(12) << p.name;
-                reportFile << " (Requires: " << systemConfig.mem_per_proc << " KB)" << endl;
+                reportFile << " (Requires: " << p.memorySize << " KB)" << endl;
             }
         }
     }
@@ -1176,7 +1310,12 @@ void generateUtilizationReport() {
                 reportFile << left << setw(12) << p.name << " (";
                 reportFile << setw(25) << ss.str() << ")";
                 reportFile << right << setw(8) << "Core: " << p.core;
-                reportFile << right << setw(12) << "Finished";
+                if (p.has_violation) {
+                    reportFile << right << setw(12) << "VIOLATION";
+                }
+                else {
+                    reportFile << right << setw(12) << "Finished";
+                }
                 reportFile << setw(8) << p.tasksCompleted << " / " << p.totalTasks << endl;
             }
         }
@@ -1192,12 +1331,125 @@ void generateUtilizationReport() {
     cout << "System status report generated and saved to csopesy-log.txt" << endl;
 }
 
+// === [NEW] === Helper function to parse user-defined instruction strings
+bool parseInstructionsString(const string& raw_instructions, vector<ProcessInstruction>& instructions) {
+    stringstream ss(raw_instructions);
+    string segment;
+
+    while (getline(ss, segment, ';')) {
+        // Trim leading/trailing whitespace from the segment
+        segment.erase(0, segment.find_first_not_of(" \t\r\n"));
+        segment.erase(segment.find_last_not_of(" \t\r\n") + 1);
+        if (segment.empty()) continue;
+
+        stringstream line_ss(segment);
+        string command;
+        line_ss >> command;
+
+        ProcessInstruction instr;
+        bool success = true;
+
+        if (command == "DECLARE") {
+            string var, val_str;
+            if (line_ss >> var >> val_str) {
+                instr.type = ProcessInstruction::DECLARE;
+                instr.var_name = var;
+                try {
+                    instr.value = stoi(val_str);
+                }
+                catch (...) { success = false; }
+            }
+            else { success = false; }
+        }
+        else if (command == "ADD") {
+            string var, val_str;
+            if (line_ss >> var >> val_str) {
+                instr.type = ProcessInstruction::ADD;
+                instr.var_name = var;
+                try {
+                    instr.value = stoi(val_str);
+                }
+                catch (...) { success = false; }
+            }
+            else { success = false; }
+        }
+        else if (command == "SUBTRACT") {
+            string var, val_str;
+            if (line_ss >> var >> val_str) {
+                instr.type = ProcessInstruction::SUBTRACT;
+                instr.var_name = var;
+                try {
+                    instr.value = stoi(val_str);
+                }
+                catch (...) { success = false; }
+            }
+            else { success = false; }
+        }
+        else if (command == "READ") {
+            string var, addr_str;
+            if (line_ss >> var >> addr_str) {
+                instr.type = ProcessInstruction::READ;
+                instr.var_name = var;
+                try {
+                    instr.memory_address = stoul(addr_str, nullptr, 0); // 0 allows auto-detect (e.g. 0x)
+                }
+                catch (...) { success = false; }
+            }
+            else { success = false; }
+        }
+        else if (command == "WRITE") {
+            string addr_str, var;
+            if (line_ss >> addr_str >> var) {
+                instr.type = ProcessInstruction::WRITE;
+                instr.var_name = var;
+                try {
+                    instr.memory_address = stoul(addr_str, nullptr, 0);
+                }
+                catch (...) { success = false; }
+            }
+            else { success = false; }
+        }
+        else if (command == "PRINT") {
+            // Simple version: PRINT "message here"
+            string message;
+            // find the first quote
+            size_t first_quote = segment.find('"');
+            size_t last_quote = segment.rfind('"');
+            if (first_quote != string::npos && last_quote != string::npos && first_quote != last_quote) {
+                instr.type = ProcessInstruction::PRINT;
+                instr.message = segment.substr(first_quote + 1, last_quote - first_quote - 1);
+            }
+            else { success = false; }
+        }
+        else {
+            success = false; // Unknown command
+        }
+
+        if (success) {
+            instructions.push_back(instr);
+        }
+        else {
+            cout << "Error parsing instruction: " << segment << endl;
+            return false; // Stop parsing on error
+        }
+    }
+
+    // Spec: 1-50 instructions
+    if (instructions.size() < 1 || instructions.size() > 50) {
+        cout << "Error: Instruction count must be between 1 and 50. Found: " << instructions.size() << endl;
+        return false;
+    }
+
+    return true;
+}
+
+
 // =================== Functions - END =================== //
 
 // ===================== Main ===================== //
 int main() {
     string command;
-    unordered_map<string, Screen> screens;
+    // unordered_map<string, Screen> screens; // Moved to global scope
     bool inScreen = false;
     string currentScreen;
 
@@ -1208,11 +1460,8 @@ int main() {
         if (inScreen) {
             cout << "\nAJEL OS [" << currentScreen << "]> ";
         }
-
         else {
-            if (!isSchedulerRunning) {
-                cout << "\nAJEL OS> ";
-            }
+            cout << "\nAJEL OS> ";
         }
 
         getline(cin, command);
@@ -1244,6 +1493,7 @@ int main() {
         }
         else if (command == "clear") {
             if (inScreen) {
+                lock_guard<mutex> lock(screensMutex);
                 screens[currentScreen].display();
             }
             else {
@@ -1256,11 +1506,13 @@ int main() {
             for (const auto& proc : globalProcesses) {
                 cout << "\n== Process " << idx++ << " ==\n";
                 cout << "Name: " << proc.name << "\n";
-                cout << "Core: " << proc.core + 1 << "\n";
+                cout << "Core: " << (proc.core == -1 ? "N/A" : to_string(proc.core)) << "\n";
                 cout << "Progress: " << proc.tasksCompleted << " / " << proc.totalTasks << "\n";
 
                 string status;
-                if (proc.isFinished) status = "Finished!";
+                if (proc.isFinished) {
+                    status = proc.has_violation ? "Terminated (Violation)" : "Finished!";
+                }
                 else if (proc.startTime != 0) status = "Running";
                 else status = "Waiting for Memory";
                 cout << "Status: " << status << "\n";
@@ -1275,6 +1527,7 @@ int main() {
                         cout << "  " << line << "\n";
                         count++;
                     }
+                    if (count > 0) cout << "  (See " << logFileName << " for full log)\n";
                     infile.close();
                 }
                 else {
@@ -1282,86 +1535,167 @@ int main() {
                 }
             }
         }
-            else if (command.rfind("screen -s ", 0) == 0) {
-                if (inScreen) {
-                    cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
-                    continue;
-                }
+        else if (command.rfind("screen -s ", 0) == 0) {
+            if (inScreen) {
+                cout << "Cannot create new screen while inside a screen. Type 'exit' first." << endl;
+                continue;
+            }
 
-                // Parse the command to extract process name and memory size
-                string params = command.substr(10); // Remove "screen -s "
-                istringstream iss(params);
-                string name;
-                string memorySizeStr;
-                
-                // Extract process name and memory size
-                if (!(iss >> name >> memorySizeStr)) {
-                    cout << "Usage: screen -s <process_name> <process_memory_size>" << endl;
-                    continue;
-                }
-                
-                // Convert memory size string to integer
-                int memorySize;
-                try {
-                    memorySize = stoi(memorySizeStr);
-                } catch (const invalid_argument& e) {
+            // Parse the command to extract process name and memory size
+            string params = command.substr(10); // Remove "screen -s "
+            istringstream iss(params);
+            string name;
+            string memorySizeStr;
+
+            // Extract process name and memory size
+            if (!(iss >> name >> memorySizeStr)) {
+                cout << "Usage: screen -s <process_name> <process_memory_size>" << endl;
+                continue;
+            }
+
+            // Convert memory size string to integer
+            int memorySize;
+            try {
+                memorySize = stoi(memorySizeStr);
+            }
+            catch (const invalid_argument) {
+                cout << "Invalid memory allocation" << endl;
+                continue;
+            }
+            catch (const out_of_range) {
+                cout << "Invalid memory allocation" << endl;
+                continue;
+            }
+
+            // Validate memory size is within range [2^6, 2^16] = [64, 65536]
+            if (memorySize < 64 || memorySize > 65536) {
+                cout << "Invalid memory allocation" << endl;
+                continue;
+            }
+
+            // Validate memory size is a power of 2
+            bool isPowerOfTwo = (memorySize > 0) && ((memorySize & (memorySize - 1)) == 0);
+            if (!isPowerOfTwo) {
+                cout << "Invalid memory allocation" << endl;
+                continue;
+            }
+
+            // Check if screen already exists
+            lock_guard<mutex> lock(screensMutex);
+            if (screens.find(name) == screens.end()) {
+                screens[name] = Screen(name, memorySize);
+                cout << "Screen \"" << name << "\" created with " << memorySize << " bytes allocated." << endl;
+            }
+            else {
+                cout << "Screen \"" << name << "\" already exists." << endl;
+            }
+        }
+        // === [NEW] === Implementation of the screen -c command
+        else if (command.rfind("screen -c ", 0) == 0) {
+            if (!isSchedulerRunning) {
+                cout << "Scheduler is not running. Cannot create new processes." << endl;
+                continue;
+            }
+
+            // Parse: screen -c <name> <mem> "<instructions>"
+            string cmd_part = command.substr(10);
+            stringstream ss(cmd_part);
+            string name, mem_str;
+
+            ss >> name >> mem_str;
+
+            size_t first_quote = cmd_part.find('"');
+            size_t last_quote = cmd_part.rfind('"');
+
+            if (name.empty() || mem_str.empty() || first_quote == string::npos || last_quote == string::npos || first_quote == last_quote) {
+                cout << "Invalid command. Usage: screen -c <name> <mem> \"<instructions>\"" << endl;
+                continue;
+            }
+
+            string instruction_str = cmd_part.substr(first_quote + 1, last_quote - first_quote - 1);
+
+            int memorySize;
+            try {
+                memorySize = stoi(mem_str);
+                if (memorySize < 64 || memorySize > 65536 || ((memorySize > 0) && (memorySize & (memorySize - 1)) != 0)) {
                     cout << "Invalid memory allocation" << endl;
                     continue;
-                } catch (const out_of_range& e) {
-                    cout << "Invalid memory allocation" << endl;
-                    continue;
-                }
-                
-                // Validate memory size is within range [2^6, 2^16] = [64, 65536]
-                if (memorySize < 64 || memorySize > 65536) {
-                    cout << "Invalid memory allocation" << endl;
-                    continue;
-                }
-                
-                // Validate memory size is a power of 2
-                bool isPowerOfTwo = (memorySize & (memorySize - 1)) == 0;
-                if (!isPowerOfTwo) {
-                    cout << "Invalid memory allocation" << endl;
-                    continue;
-                }
-                
-                // Check if screen already exists
-                if (screens.find(name) == screens.end()) {
-                    screens[name] = Screen(name, memorySize);
-                    cout << "Screen \"" << name << "\" created with " << memorySize << " bytes allocated." << endl;
-                }
-                else {
-                    cout << "Screen \"" << name << "\" already exists." << endl;
                 }
             }
-            else if (command.rfind("screen -r ", 0) == 0) {
-                if (inScreen) {
-                    cout << "Already in a screen. Type 'exit' first." << endl;
-                    continue;
-                }
+            catch (...) {
+                cout << "Invalid memory allocation" << endl;
+                continue;
+            }
 
-                string name = command.substr(10);
-                auto it = screens.find(name);
-                
-                if (it == screens.end()) {
-                    cout << "Process " << name << " not found." << endl;
+            scoped_lock lock(screensMutex, processMutex);
+
+
+            bool name_exists = false;
+            if (screens.count(name)) name_exists = true;
+            for (const auto& p : globalProcesses) {
+                if (p.name == name) name_exists = true;
+            }
+
+            if (name_exists) {
+                cout << "Process or screen with name \"" << name << "\" already exists." << endl;
+                continue;
+            }
+
+            vector<ProcessInstruction> instructions;
+            if (!parseInstructionsString(instruction_str, instructions)) {
+                cout << "Failed to create process due to instruction parsing error." << endl;
+                continue;
+            }
+
+            // Create the Screen and Process
+            screens[name] = Screen(name, memorySize, countTotalInstructions(instructions));
+
+            Process newProc(name, memorySize);
+            newProc.instructions = instructions;
+            newProc.totalTasks = countTotalInstructions(instructions);
+
+            globalProcesses.push_back(move(newProc));
+
+            // Add to waiting queue for admission
+            {
+                lock_guard<mutex> wait_lock(waiting_queue_mutex);
+                waiting_for_memory_queue.push(&globalProcesses.back());
+            }
+            memory_cv.notify_one(); // Notify admission scheduler of new process
+
+            cout << "Process \"" << name << "\" created with " << memorySize << " bytes and " << instructions.size() << " instructions. Now waiting for memory." << endl;
+
+        }
+        else if (command.rfind("screen -r ", 0) == 0) {
+            if (inScreen) {
+                cout << "Already in a screen. Type 'exit' first." << endl;
+                continue;
+            }
+
+            string name = command.substr(10);
+            lock_guard<mutex> lock(screensMutex);
+            auto it = screens.find(name);
+
+            if (it == screens.end()) {
+                cout << "Process " << name << " not found." << endl;
+            }
+            else {
+                Screen& screen = it->second;
+
+                // === [MODIFIED] === This check now correctly uses info from the Screen object,
+                // which is updated by the worker thread upon violation.
+                if (screen.hasMemoryViolation()) {
+                    cout << "Process " << name << " shut down due to memory access violation error that occurred at "
+                        << screen.getViolationTime() << ". " << screen.getViolationAddress() << " invalid." << endl;
                 }
                 else {
-                    Screen& screen = it->second;
-                    
-                    // Check if process has memory access violation
-                    if (screen.hasMemoryViolation()) {
-                        cout << "Process " << name << " shut down due to memory access violation error that occurred at " 
-                            << screen.getViolationTime() << ". " << screen.getViolationAddress() << " invalid." << endl;
-                    }
-                    else {
-                        // Normal screen access
-                        inScreen = true;
-                        currentScreen = name;
-                        screen.display();
-                    }
+                    // Normal screen access
+                    inScreen = true;
+                    currentScreen = name;
+                    screen.display();
                 }
             }
+        }
         else if (command == "screen -ls") {
             displaySchedulerUI(globalProcesses);
         }
@@ -1372,13 +1706,12 @@ int main() {
             }
 
             {
-                // Reset all queues and memory usage before starting (REVISED)
-                lock_guard<mutex> proc_lock(processMutex);
-                lock_guard<mutex> wait_lock(waiting_queue_mutex);
-                lock_guard<mutex> ready_lock(queue_mutex);
-                lock_guard<mutex> mem_lock(memory_mutex);
+                scoped_lock lock(processMutex, waiting_queue_mutex, queue_mutex, memory_mutex, screensMutex);
+
+
 
                 globalProcesses.clear();
+                screens.clear();
                 while (!waiting_for_memory_queue.empty()) waiting_for_memory_queue.pop();
                 while (!ready_queue.empty()) ready_queue.pop();
                 current_memory_used = 0;
@@ -1389,7 +1722,8 @@ int main() {
                     stringstream name;
                     name << "process" << setfill('0') << setw(2) << i;
 
-                    Process newProc(name.str());
+                    // === [MODIFIED] === Use new Process constructor
+                    Process newProc(name.str(), systemConfig.mem_per_proc);
                     newProc.instructions = generateProcessInstructions(systemConfig.min_ins, systemConfig.max_ins);
                     newProc.totalTasks = countTotalInstructions(newProc.instructions);
                     newProc.currentInstructionIndex = 0;
@@ -1432,20 +1766,13 @@ int main() {
         }
         else if (command == "report-util") {
             generateUtilizationReport();
-        }/*
-        else if (command.rfind("crash ", 0) == 0) {
-            string name = command.substr(6);
-            auto it = screens.find(name);
-            if (it != screens.end()) {
-                it->second.simulateMemoryViolation();
-                cout << "Simulated memory violation for process " << name << endl;
-            } else {
-                cout << "Process " << name << " not found." << endl;
-            }
-        }*/
+        }
         else if (!command.empty()) {
             if (inScreen) {
+                // This doesn't do anything meaningful for the process, just advances the UI
+                lock_guard<mutex> lock(screensMutex);
                 screens[currentScreen].advance();
+                screens[currentScreen].display();
             }
             else {
                 cout << "Command not recognized." << endl;
