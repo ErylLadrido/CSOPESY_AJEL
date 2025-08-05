@@ -35,52 +35,23 @@
 
 using namespace std;
 
+// ===================== Forward Declarations & Core Structs ===================== //
+
 void displayHeader();
 void displayMainMenu();
-// === [NEW] === Forward declaration for the instruction parser
 bool parseInstructionsString(const string& raw_instructions, vector<struct ProcessInstruction>& instructions);
 
 
-// ======================= Global Variables ======================= //
-
-bool isSchedulerRunning = false;
-bool isSystemInitialized = false; // New flag to track system initialization
-thread schedulerThread;
-vector<thread> cpu_workers;
-
-mutex processMutex; // Used for protecting shared resources like globalProcesses and cout
-vector<struct Process> globalProcesses; // List of all processes
-bool screenActive = false;
-
-// === [NEW] === Added mutex for the screens map to allow access from worker threads
-mutex screensMutex;
-unordered_map<string, class Screen> screens;
-
-
-// --- Threading & Scheduling Variables ---
-queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
-mutex queue_mutex;                  // Mutex to protect the ready_queue
-condition_variable scheduler_cv;    // Notifies worker threads about new processes
-
-// --- Memory Management Variables (REVISED/ADDED) ---
-int current_memory_used = 0;
-mutex memory_mutex;
-condition_variable memory_cv; // Notifies the admission scheduler about freed memory
-queue<struct Process*> waiting_for_memory_queue; // Processes waiting for memory allocation
-mutex waiting_queue_mutex;
-
-int quantumCycleCounter = 0;
-int nextPID = 1;
-
-// --- For VMStat ---
-atomic<int> pageFaults{0};
-atomic<int> pageReplacements{0};
-atomic<int> totalCpuTicks{0};
-atomic<int> activeCpuTicks{0};
-atomic<int> idleCpuTicks{0};
-
-mutex backing_store_mutex;
-// For Paging Allocator (PUT HERE cause it will error if not)
+/**
+ * Represents a physical memory frame in the system.
+ */
+struct FrameInfo {
+    bool isFree = true;
+    int ownerPID = -1;
+    int virtualPageNumber = -1; // Which virtual page is stored here
+    bool dirty = false;
+    bool referenced = false;
+};
 
 /**
  * Represents an entry in a process's page table.
@@ -93,24 +64,7 @@ struct PageTableEntry {
     bool referenced = false;
 };
 
-/**
- * Represents a physical memory frame in the system.
- */
-struct FrameInfo {
-    bool isFree = true;
-    int ownerPID = -1; 
-    int virtualPageNumber = -1; // Which virtual page is stored here
-    bool dirty = false;
-    bool referenced = false;
-};
-
-
-// -- For Demand Paging Allocator ---
-vector<FrameInfo> frameTable;
-mutex frameTableMutex;
-std::queue<int> frameEvictionQueue;
-
-// --- Configuration Variables ---
+// --- Configuration Struct ---
 struct SystemConfig {
     int num_cpu;
     string scheduler;
@@ -122,7 +76,7 @@ struct SystemConfig {
     // Memory allocation parameters
     int max_overall_mem;
     int mem_per_frame;
-    int min_mem_per_proc; 
+    int min_mem_per_proc;
     int max_mem_per_proc;
     // Constructor
     SystemConfig() :
@@ -135,9 +89,9 @@ struct SystemConfig {
         delay_per_exec(0),
         max_overall_mem(0),
         mem_per_frame(0),
-        min_mem_per_proc(0), 
+        min_mem_per_proc(0),
         max_mem_per_proc(0) {
-}
+    }
 
     // Method to validate configuration
     bool isValid() const {
@@ -152,15 +106,98 @@ struct SystemConfig {
             // New memory validation
             max_overall_mem > 0 &&
             mem_per_frame > 0 &&
-            min_mem_per_proc > 0 &&      
-            max_mem_per_proc > 0 &&      
-            max_mem_per_proc >= min_mem_per_proc && 
-            mem_per_frame <= max_overall_mem &&
-            max_mem_per_proc <= max_overall_mem; 
+            min_mem_per_proc > 0 &&
+            max_mem_per_proc > 0 &&
+            max_mem_per_proc >= min_mem_per_proc &&
+            mem_per_frame <= max_overall_mem;
+            //max_mem_per_proc <= max_overall_mem;
     }
-} systemConfig;
+};
+
+// --- Global System Configuration and Memory Structures ---
+SystemConfig systemConfig;
+vector<FrameInfo> frameTable;
+mutex frameTableMutex;
+std::queue<int> frameEvictionQueue;
+
+/**
+ * Page replacement class definition. Needs frameTable to be declared first.
+ */
+class ImprovedPageReplacement {
+private:
+    queue<pair<int, int>> pageQueue; // <frameIndex, timestamp>
+    int timestamp_counter = 0;
+    mutex replacement_mutex;
+
+public:
+    void addPage(int frameIndex) {
+        lock_guard<mutex> lock(replacement_mutex);
+        pageQueue.push({ frameIndex, timestamp_counter++ });
+    }
+
+    int evictPage() {
+        lock_guard<mutex> lock(replacement_mutex);
+
+        while (!pageQueue.empty()) {
+            auto [frameIndex, timestamp] = pageQueue.front();
+            pageQueue.pop();
+
+            // Verify frame is still valid for eviction
+            if (frameIndex >= 0 && frameIndex < frameTable.size() && !frameTable[frameIndex].isFree) {
+                return frameIndex;
+            }
+        }
+        return -1;
+    }
+
+    bool isEmpty() {
+        lock_guard<mutex> lock(replacement_mutex);
+        return pageQueue.empty();
+    }
+};
+
+
+// ======================= Global Variables ======================= //
+
+bool isSchedulerRunning = false;
+bool isSystemInitialized = false; // New flag to track system initialization
+thread schedulerThread;
+vector<thread> cpu_workers;
+
+mutex processMutex; // Used for protecting shared resources like globalProcesses and cout
+vector<struct Process> globalProcesses; // List of all processes
+bool screenActive = false;
+
+mutex screensMutex;
+unordered_map<string, class Screen> screens;
+
+// --- Threading & Scheduling Variables ---
+queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
+mutex queue_mutex;                  // Mutex to protect the ready_queue
+condition_variable scheduler_cv;    // Notifies worker threads about new processes
+
+// --- Memory Management Variables ---
+int current_memory_used = 0;
+mutex memory_mutex;
+condition_variable memory_cv; // Notifies the admission scheduler about freed memory
+queue<struct Process*> waiting_for_memory_queue; // Processes waiting for memory allocation
+mutex waiting_queue_mutex;
+
+int quantumCycleCounter = 0;
+int nextPID = 1;
+ImprovedPageReplacement pageReplacer;
+
+// --- For VMStat ---
+atomic<int> pageFaults{ 0 };
+atomic<int> pageReplacements{ 0 };
+atomic<int> totalCpuTicks{ 0 };
+atomic<int> activeCpuTicks{ 0 };
+atomic<int> idleCpuTicks{ 0 };
+
+mutex backing_store_mutex;
 
 // ===================== Global Variables - END ===================== //
+
 
 // ===================== Structures ===================== //
 
@@ -353,6 +390,84 @@ public:
 
 // ===================== Functions ===================== //
 
+bool verifyBackingStoreIntegrity() {
+    ifstream backingFile("csopesy-backing-store.txt");
+    if (!backingFile) {
+        cout << "Backing store file not found - will be created on first use." << endl;
+        return true;
+    }
+
+    string line;
+    regex entryPattern(R"(PID=(\d+)\s+VPN=(\d+)\s+DATA=(.*))");
+    int validEntries = 0;
+    int invalidEntries = 0;
+
+    while (getline(backingFile, line)) {
+        if (line.empty()) continue;
+
+        smatch match;
+        if (regex_match(line, match, entryPattern)) {
+            validEntries++;
+
+            // Verify data format
+            istringstream dataStream(match[3]);
+            string hexVal;
+            int dataCount = 0;
+
+            while (dataStream >> hexVal) {
+                try {
+                    stoi(hexVal, nullptr, 16);
+                    dataCount++;
+                }
+                catch (...) {
+                    cout << "Warning: Invalid hex value in backing store: " << hexVal << endl;
+                }
+            }
+
+            if (dataCount != systemConfig.mem_per_frame / 2) {
+                cout << "Warning: Incorrect data size for PID=" << match[1] << " VPN=" << match[2] << endl;
+            }
+        }
+        else {
+            invalidEntries++;
+            cout << "Warning: Invalid entry format: " << line << endl;
+        }
+    }
+
+    backingFile.close();
+
+    cout << "Backing store integrity check:" << endl;
+    cout << "  Valid entries: " << validEntries << endl;
+    cout << "  Invalid entries: " << invalidEntries << endl;
+
+    return invalidEntries == 0;
+}
+
+bool checkMemoryViolation(int address, int processMemorySize, const string& operation, int pid, int coreId, ofstream& logFile) {
+    if (address < 0 || address >= processMemorySize) {
+        time_t now = time(0);
+        tm localtm;
+#ifdef _WIN32
+        localtime_s(&localtm, &now);
+#else
+        localtm = *localtime(&now);
+#endif
+        stringstream timestamp;
+        timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
+
+        stringstream violationAddr;
+        violationAddr << "0x" << hex << uppercase << address;
+
+        logFile << timestamp.str() << " Core:" << coreId
+            << " MEMORY VIOLATION: " << operation << " at address "
+            << violationAddr.str() << " (Process memory: 0x0 - 0x"
+            << hex << uppercase << (processMemorySize - 1) << dec << ")" << endl;
+
+        return true;
+    }
+    return false;
+}
+
 void savePageToBackingStore(int pid, int vpn, const unordered_map<int, uint16_t>& memory, int frameBaseAddr) {
     lock_guard<mutex> lock(backing_store_mutex);
 
@@ -477,7 +592,7 @@ int evictFrame() {
         int evictedVPN = evicted.virtualPageNumber;
 
         auto it = find_if(globalProcesses.begin(), globalProcesses.end(),
-                          [evictedPID](const Process& p) { return p.pid == evictedPID; });
+            [evictedPID](const Process& p) { return p.pid == evictedPID; });
 
         if (it != globalProcesses.end()) {
             Process& evictedProcess = *it;
@@ -813,7 +928,7 @@ void initializeSystem() {
     cout << "├── Max Overall Memory: " << systemConfig.max_overall_mem << " KB" << endl;
     cout << "├── Memory per Frame: " << systemConfig.mem_per_frame << " KB" << endl;
     cout << "├── Min Memory per Process: " << systemConfig.min_mem_per_proc << " KB" << endl;
-    cout << "└── Max Memory per Process: " << systemConfig.max_mem_per_proc << " KB" << endl;   
+    cout << "└── Max Memory per Process: " << systemConfig.max_mem_per_proc << " KB" << endl;
     cout << string(50, '=') << endl;
 
     // Initialize Frame Table
@@ -1064,7 +1179,7 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         int addr = instr.memory_address;
 
         // Check for memory violation before proceeding
-        if (addr < 0 || addr >= process->memorySize) {
+        if (addr < 0 || addr >= (process->memorySize * 1024)) {
             process->isFinished = true;
             process->has_violation = true;
             stringstream ss;
@@ -1133,7 +1248,7 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         int addr = instr.memory_address;
 
         // Bounds check for destination address
-        if (addr < 0 || addr >= process->memorySize) {
+        if (addr < 0 || addr >= (process->memorySize * 1024)) {
             process->isFinished = true;
             process->has_violation = true;
             stringstream ss;
@@ -1189,6 +1304,251 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     }
     }
     return true;
+}
+
+void displayProcessSMI() {
+    vector<tuple<string, int, int, int, bool, bool, string, int, int>> processInfos;
+    int totalMemUsed = 0;
+
+    {
+        lock_guard<mutex> proc_lock(processMutex);
+        lock_guard<mutex> mem_lock(memory_mutex);
+        totalMemUsed = current_memory_used;
+
+        for (const auto& proc : globalProcesses) {
+            int framesUsed = 0;
+            int validPages = 0;
+
+            // Count frames and valid pages for this process
+            for (const auto& [vpn, pageEntry] : proc.pageTable) {
+                if (pageEntry.valid) {
+                    validPages++;
+                    framesUsed++;
+                }
+            }
+
+            processInfos.emplace_back(
+                proc.name,
+                proc.core,
+                proc.tasksCompleted,
+                proc.totalTasks,
+                proc.isFinished,
+                proc.has_violation,
+                proc.violation_address,
+                proc.memorySize,
+                validPages
+            );
+        }
+    }
+
+    cout << "\n=== PROCESS-SMI REPORT ===" << endl;
+    cout << "Total Memory Used: " << totalMemUsed << " / " << systemConfig.max_overall_mem << " KB" << endl;
+    cout << "Total Frames: " << (systemConfig.max_overall_mem / systemConfig.mem_per_frame) << endl;
+    cout << "Frame Size: " << systemConfig.mem_per_frame << " KB" << endl;
+    cout << string(80, '=') << endl;
+
+    int idx = 1;
+    for (const auto& info : processInfos) {
+        auto& [name, core, completed, total, isFinished, has_violation, violation_addr, memSize, validPages] = info;
+
+        cout << "\n== Process " << idx++ << " ==" << endl;
+        cout << "Name: " << name << endl;
+        cout << "PID: " << (idx - 1) << endl;
+        cout << "Core: " << (core == -1 ? "N/A" : to_string(core)) << endl;
+        cout << "Memory Allocated: " << memSize << " KB" << endl;
+        cout << "Pages in Memory: " << validPages << " / " << (memSize / systemConfig.mem_per_frame) << endl;
+        cout << "Progress: " << completed << " / " << total << " instructions" << endl;
+
+        string status;
+        if (isFinished) {
+            status = has_violation ? "Terminated (Memory Violation)" : "Finished";
+            if (has_violation) {
+                cout << "Violation Address: " << violation_addr << endl;
+            }
+        }
+        else {
+            status = (core == -1) ? "Waiting for CPU" : "Running";
+        }
+        cout << "Status: " << status << endl;
+
+        // Show recent log entries
+        cout << "-- Recent Log Entries --" << endl;
+        string logFileName = name + ".txt";
+        ifstream infile(logFileName);
+        if (infile.is_open()) {
+            vector<string> lines;
+            string line;
+            while (getline(infile, line)) {
+                lines.push_back(line);
+            }
+            infile.close();
+
+            int startIdx = max(0, static_cast<int>(lines.size()) - 3);
+            for (int i = startIdx; i < lines.size(); i++) {
+                cout << "  " << lines[i] << endl;
+            }
+        }
+        else {
+            cout << "  (No log file found)" << endl;
+        }
+        cout << string(50, '-') << endl;
+    }
+}
+
+void generateDetailedMemorySnapshot(int quantumCycle) {
+    time_t now = time(0);
+    tm localtm;
+#ifdef _WIN32
+    localtime_s(&localtm, &now);
+#else
+    localtm = *localtime(&now);
+#endif
+    stringstream timestamp;
+    timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S%p)");
+
+    // Collect memory layout information
+    vector<tuple<int, string, int, int, int>> memoryLayout; // end, name, start, pid, pages_in_memory
+    int nextAddress = 0;
+    int totalProcesses = 0;
+    int totalPagesInMemory = 0;
+
+    {
+        lock_guard<mutex> lock(processMutex);
+        lock_guard<mutex> frame_lock(frameTableMutex);
+
+        for (const auto& proc : globalProcesses) {
+            if (!proc.isFinished && proc.startTime != 0) {
+                int start = nextAddress;
+                int end = start + proc.memorySize;
+
+                // Count pages in memory for this process
+                int pagesInMemory = 0;
+                for (const auto& [vpn, pageEntry] : proc.pageTable) {
+                    if (pageEntry.valid) {
+                        pagesInMemory++;
+                    }
+                }
+                totalPagesInMemory += pagesInMemory;
+
+                memoryLayout.emplace_back(end, proc.name, start, proc.pid, pagesInMemory);
+                nextAddress = end;
+                totalProcesses++;
+            }
+        }
+    }
+
+    int totalExternalFragmentation = systemConfig.max_overall_mem - nextAddress;
+    int totalFrames = systemConfig.max_overall_mem / systemConfig.mem_per_frame;
+
+    // Count free frames
+    int freeFrames = 0;
+    {
+        lock_guard<mutex> frame_lock(frameTableMutex);
+        for (const auto& frame : frameTable) {
+            if (frame.isFree) freeFrames++;
+        }
+    }
+
+    stringstream filename;
+    filename << "memory_stamp_" << setfill('0') << setw(2) << quantumCycle << ".txt";
+    ofstream outfile(filename.str());
+    if (!outfile.is_open()) return;
+
+    outfile << "Memory Snapshot " << timestamp.str() << endl;
+    outfile << "Quantum Cycle: " << quantumCycle << endl;
+    outfile << "Number of processes in memory: " << totalProcesses << endl;
+    outfile << "Total pages in memory: " << totalPagesInMemory << " / " << totalFrames << endl;
+    outfile << "Free frames: " << freeFrames << endl;
+    outfile << "External fragmentation: " << totalExternalFragmentation << " KB" << endl;
+    outfile << string(60, '=') << endl;
+
+    // Sort by end address (descending for the format requirement)
+    sort(memoryLayout.begin(), memoryLayout.end(), [](const tuple<int, string, int, int, int>& a, const tuple<int, string, int, int, int>& b) {
+        return get<0>(a) > get<0>(b);
+        });
+
+    outfile << "----end---- = " << systemConfig.max_overall_mem << endl;
+    for (const auto& [end, name, start, pid, pagesInMem] : memoryLayout) {
+        outfile << end << endl;
+        outfile << name << " (PID:" << pid << ", Pages:" << pagesInMem << ")" << endl;
+        outfile << start << endl;
+    }
+    outfile << "----start-- = 0" << endl;
+
+    outfile.close();
+}
+
+void printEnhancedVMStat() {
+    lock_guard<mutex> procLock(processMutex);
+    lock_guard<mutex> queueLock(queue_mutex);
+    lock_guard<mutex> waitLock(waiting_queue_mutex);
+    lock_guard<mutex> memLock(memory_mutex);
+    lock_guard<mutex> frameLock(frameTableMutex);
+
+    int totalMemBytes = systemConfig.max_overall_mem * 1024;
+    int usedMemBytes = current_memory_used * 1024;
+    int freeMemBytes = totalMemBytes - usedMemBytes;
+
+    // Count frame statistics
+    int totalFrames = frameTable.size();
+    int usedFrames = 0;
+    int dirtyFrames = 0;
+
+    for (const auto& frame : frameTable) {
+        if (!frame.isFree) {
+            usedFrames++;
+            if (frame.dirty) dirtyFrames++;
+        }
+    }
+
+    int freeFrames = totalFrames - usedFrames;
+
+    // Count process statistics
+    int runningProcs = 0, waitingProcs = 0, finishedProcs = 0;
+    for (const auto& proc : globalProcesses) {
+        if (proc.isFinished) finishedProcs++;
+        else if (proc.startTime != 0) runningProcs++;
+        else waitingProcs++;
+    }
+
+    cout << "\n" << string(50, '=') << endl;
+    cout << "           VIRTUAL MEMORY STATISTICS" << endl;
+    cout << string(50, '=') << endl;
+
+    cout << "\n[MEMORY USAGE]" << endl;
+    cout << "Total Memory         : " << setw(10) << totalMemBytes << " bytes" << endl;
+    cout << "Used Memory          : " << setw(10) << usedMemBytes << " bytes" << endl;
+    cout << "Free Memory          : " << setw(10) << freeMemBytes << " bytes" << endl;
+    cout << "Memory Utilization   : " << setw(9) << fixed << setprecision(1)
+        << (totalMemBytes > 0 ? (double)usedMemBytes / totalMemBytes * 100 : 0) << "%" << endl;
+
+    cout << "\n[FRAME STATISTICS]" << endl;
+    cout << "Total Frames         : " << setw(10) << totalFrames << endl;
+    cout << "Used Frames          : " << setw(10) << usedFrames << endl;
+    cout << "Free Frames          : " << setw(10) << freeFrames << endl;
+    cout << "Dirty Frames         : " << setw(10) << dirtyFrames << endl;
+    cout << "Frame Size           : " << setw(10) << systemConfig.mem_per_frame << " KB" << endl;
+
+    cout << "\n[CPU STATISTICS]" << endl;
+    cout << "Total CPU Ticks      : " << setw(10) << totalCpuTicks.load() << endl;
+    cout << "Active CPU Ticks     : " << setw(10) << activeCpuTicks.load() << endl;
+    cout << "Idle CPU Ticks       : " << setw(10) << idleCpuTicks.load() << endl;
+    cout << "CPU Utilization      : " << setw(9) << fixed << setprecision(1)
+        << (totalCpuTicks.load() > 0 ? (double)activeCpuTicks.load() / totalCpuTicks.load() * 100 : 0) << "%" << endl;
+
+    cout << "\n[PAGING STATISTICS]" << endl;
+    cout << "Page Faults          : " << setw(10) << pageFaults.load() << endl;
+    cout << "Pages Paged Out      : " << setw(10) << pageReplacements.load() << endl;
+    cout << "Page Fault Rate      : " << setw(9) << fixed << setprecision(3)
+        << (totalCpuTicks.load() > 0 ? (double)pageFaults.load() / totalCpuTicks.load() : 0) << endl;
+
+    cout << "\n[PROCESS STATISTICS]" << endl;
+    cout << "Running Processes    : " << setw(10) << runningProcs << endl;
+    cout << "Waiting Processes    : " << setw(10) << waitingProcs << endl;
+    cout << "Finished Processes   : " << setw(10) << finishedProcs << endl;
+    cout << "Total Processes      : " << setw(10) << globalProcesses.size() << endl;
+
+    cout << "\n" << string(50, '=') << endl;
 }
 
 
@@ -1383,7 +1743,8 @@ void cpu_worker_main(int coreId) {
             if (!ready_queue.empty()) {
                 currentProcess = ready_queue.front();
                 ready_queue.pop();
-            } else {
+            }
+            else {
                 // Idle tick
                 totalCpuTicks++;
                 idleCpuTicks++;
@@ -1426,7 +1787,7 @@ void cpu_worker_main(int coreId) {
                 executedInstructions++;
                 totalCpuTicks++;
                 activeCpuTicks++;
-                generateMemorySnapshot(quantumCycleCounter++);
+                generateDetailedMemorySnapshot(quantumCycleCounter++);
             }
 
             outfile.close();
@@ -1502,18 +1863,16 @@ void admissionScheduler() {
 
             if (!waiting_for_memory_queue.empty()) {
                 Process* next_proc = waiting_for_memory_queue.front();
-                // Check if the next process in the queue can fit into memory
-                if (current_memory_used + next_proc->memorySize <= systemConfig.max_overall_mem) {
-                    proc_to_admit = next_proc;
-                    waiting_for_memory_queue.pop();
-                }
+                // ALWAYS admit the next process. Let the page allocator handle memory.
+                proc_to_admit = next_proc;
+                waiting_for_memory_queue.pop();
             }
         }
 
         if (proc_to_admit) {
             // If we found a process to admit, update memory and push to ready queue
             // The memory_mutex is already locked from the outer scope, so we can safely update this.
-            current_memory_used += proc_to_admit->memorySize;
+            //current_memory_used += proc_to_admit->memorySize;
 
             {
                 lock_guard<mutex> ready_lock(queue_mutex);
@@ -1915,7 +2274,7 @@ int main() {
         }
         else if (command == "clear") {
             if (inScreen) {
-                lock_guard<mutex> screen_lock(screensMutex);                
+                lock_guard<mutex> screen_lock(screensMutex);
                 screens[currentScreen].display();
             }
             else {
@@ -1924,59 +2283,7 @@ int main() {
         }
         // In the 'process-smi' command block:
         else if (command == "process-smi") {
-            // First collect process info quickly under lock
-            vector<tuple<string, int, int, int, bool, bool, string>> processInfos;
-            {
-                lock_guard<mutex> proc_lock(processMutex);
-                for (const auto& proc : globalProcesses) {
-                    processInfos.emplace_back(
-                        proc.name,
-                        proc.core,
-                        proc.tasksCompleted,
-                        proc.totalTasks,
-                        proc.isFinished,
-                        proc.has_violation,
-                        proc.violation_address
-                    );
-                }
-            }
-
-            // Now display without holding the lock
-            int idx = 1;
-            for (const auto& info : processInfos) {
-                auto& [name, core, completed, total, isFinished, has_violation, violation_addr] = info;
-
-                cout << "\n== Process " << idx++ << " ==\n";
-                cout << "Name: " << name << "\n";
-                cout << "Core: " << (core == -1 ? "N/A" : to_string(core)) << "\n";
-                cout << "Progress: " << completed << " / " << total << "\n";
-
-                string status;
-                if (isFinished) {
-                    status = has_violation ? "Terminated (Violation)" : "Finished!";
-                }
-                else {
-                    status = "Running";
-                }
-                cout << "Status: " << status << "\n";
-
-                cout << "-- Log Output --\n";
-                string logFileName = name + ".txt";
-                ifstream infile(logFileName);
-                if (infile.is_open()) {
-                    string line;
-                    int count = 0;
-                    while (getline(infile, line) && count < 5) {
-                        cout << "  " << line << "\n";
-                        count++;
-                    }
-                    if (count > 0) cout << "  (See " << logFileName << " for full log)\n";
-                    infile.close();
-                }
-                else {
-                    cout << "  (No log found)\n";
-                }
-            }
+            displayProcessSMI();
         }
         else if (command.rfind("screen -s ", 0) == 0) {
             if (inScreen) {
@@ -2129,7 +2436,7 @@ int main() {
             memory_cv.notify_one(); // Notify admission scheduler of new process
 
             cout << "Process \"" << name << "\" created with " << memorySize << " bytes and " << instructions.size() << " instructions. Now waiting for memory." << endl;
-            }
+        }
 
 
         else if (command.rfind("screen -r ", 0) == 0) {
@@ -2236,7 +2543,7 @@ int main() {
             cout << "Scheduler started (" << systemConfig.scheduler
                 << ") with 10 processes on " << systemConfig.num_cpu
                 << " cores." << endl;
-                }
+        }
         else if (command == "scheduler-stop") {
             if (!isSchedulerRunning) {
                 cout << "Scheduler is not running." << endl;
@@ -2259,7 +2566,10 @@ int main() {
             generateUtilizationReport();
         }
         else if (command == "vmstat") {
-            printVMStat();
+            printEnhancedVMStat();
+        }
+        else if (command == "verify-backing-store") {
+            verifyBackingStoreIntegrity();
         }
         else if (!command.empty()) {
             if (inScreen) {
@@ -2272,6 +2582,7 @@ int main() {
                 cout << "Command not recognized." << endl;
             }
         }
+
     }
 
     return 0;
