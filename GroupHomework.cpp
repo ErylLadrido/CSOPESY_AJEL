@@ -121,8 +121,8 @@ struct SystemConfig {
     // Memory allocation parameters
     int max_overall_mem;
     int mem_per_frame;
-    int mem_per_proc;
-
+    int min_mem_per_proc; 
+    int max_mem_per_proc;
     // Constructor
     SystemConfig() :
         num_cpu(0),
@@ -134,8 +134,9 @@ struct SystemConfig {
         delay_per_exec(0),
         max_overall_mem(0),
         mem_per_frame(0),
-        mem_per_proc(0) {
-    }
+        min_mem_per_proc(0), 
+        max_mem_per_proc(0) {
+}
 
     // Method to validate configuration
     bool isValid() const {
@@ -150,9 +151,11 @@ struct SystemConfig {
             // New memory validation
             max_overall_mem > 0 &&
             mem_per_frame > 0 &&
-            mem_per_proc > 0 &&
+            min_mem_per_proc > 0 &&      
+            max_mem_per_proc > 0 &&      
+            max_mem_per_proc >= min_mem_per_proc && 
             mem_per_frame <= max_overall_mem &&
-            mem_per_proc <= max_overall_mem;
+            max_mem_per_proc <= max_overall_mem; 
     }
 } systemConfig;
 
@@ -630,8 +633,7 @@ bool loadConfig() {
     vector<string> missingKeys;
     vector<string> requiredKeys = { "num-cpu", "scheduler", "quantum-cycles",
                                    "batch-process-freq", "min-ins", "max-ins", "delay-per-exec",
-        // New required keys
-        "max-overall-mem", "mem-per-frame", "mem-per-proc" };
+                                   "max-overall-mem", "mem-per-frame", "min-mem-per-proc", "max-mem-per-proc" };
     vector<bool> keyFound(requiredKeys.size(), false);
 
     cout << "Reading configuration from config.txt..." << endl;
@@ -702,10 +704,15 @@ bool loadConfig() {
                 keyFound[8] = true;
                 cout << "  ✓ mem-per-frame: " << systemConfig.mem_per_frame << endl;
             }
-            else if (key == "mem-per-proc") {
-                systemConfig.mem_per_proc = stoi(value);
+            else if (key == "min-mem-per-proc") {
+                systemConfig.min_mem_per_proc = stoi(value);
                 keyFound[9] = true;
-                cout << "  ✓ mem-per-proc: " << systemConfig.mem_per_proc << endl;
+                cout << "  ✓ min-mem-per-proc: " << systemConfig.min_mem_per_proc << endl;
+            }
+            else if (key == "max-mem-per-proc") {
+                systemConfig.max_mem_per_proc = stoi(value);
+                keyFound[10] = true;
+                cout << "  ✓ max-mem-per-proc: " << systemConfig.max_mem_per_proc << endl;
             }
             else {
                 cout << "Warning: Unknown configuration key ignored: " << key << endl;
@@ -785,7 +792,8 @@ void initializeSystem() {
     // Display memory parameters
     cout << "├── Max Overall Memory: " << systemConfig.max_overall_mem << " KB" << endl;
     cout << "├── Memory per Frame: " << systemConfig.mem_per_frame << " KB" << endl;
-    cout << "└── Memory per Process: " << systemConfig.mem_per_proc << " KB" << endl;
+    cout << "├── Min Memory per Process: " << systemConfig.min_mem_per_proc << " KB" << endl;
+    cout << "└── Max Memory per Process: " << systemConfig.max_mem_per_proc << " KB" << endl;   
     cout << string(50, '=') << endl;
 
     // Initialize Frame Table
