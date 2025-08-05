@@ -10,6 +10,7 @@
         "iostream": "cpp",
         "string": "cpp",
         "queue": "cpp",
-        "ios": "cpp"
+        "ios": "cpp",
+        "chrono": "cpp"
     }
 }

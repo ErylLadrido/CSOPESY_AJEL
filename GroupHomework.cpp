@@ -410,6 +410,8 @@ bool loadPageFromBackingStore(int pid, int vpn, unordered_map<int, uint16_t>& me
 
 
 int assignFrameToPage(Process& process, int virtualPageNumber, int frameIndex) {
+    lock_guard<mutex> lock(frameTableMutex);
+    
     FrameInfo& frame = frameTable[frameIndex];
 
     frame.isFree = false;
@@ -458,13 +460,11 @@ int evictFrame() {
         }
 
         FrameInfo& evicted = frameTable[evictedFrame];
-
-        if (evicted.ownerPID == -1) {
-            continue;
-        }
+        if (evicted.isFree) continue;
 
         int evictedPID = evicted.ownerPID;
         int evictedVPN = evicted.virtualPageNumber;
+        bool savedToBackingStore = false;
 
         auto it = find_if(globalProcesses.begin(), globalProcesses.end(),
                           [evictedPID](const Process& p) { return p.pid == evictedPID; });
@@ -476,6 +476,7 @@ int evictFrame() {
             if (evicted.dirty) {
                 int baseAddr = evictedVPN * systemConfig.mem_per_frame;
                 savePageToBackingStore(evictedProcess.pid, evictedVPN, evictedProcess.memory_space, baseAddr);
+                savedToBackingStore = true;
                 pageReplacements++;
             }
 
@@ -483,7 +484,7 @@ int evictFrame() {
             if (evictedProcess.pageTable.count(evictedVPN)) {
                 evictedProcess.pageTable[evictedVPN].valid = false;
             }
-        }
+        } 
 
         // Reset the frame
         evicted.isFree = true;
@@ -1484,11 +1485,8 @@ void admissionScheduler() {
 
         // === [MODIFIED] === Admission logic now checks process-specific memory size
         memory_cv.wait(lock, [] {
-            if (waiting_for_memory_queue.empty()) return !isSchedulerRunning;
-            Process* next_proc = waiting_for_memory_queue.front();
-            bool can_admit = (current_memory_used + next_proc->memorySize <= systemConfig.max_overall_mem);
-            return can_admit || !isSchedulerRunning;
-            });
+            return !waiting_for_memory_queue.empty() || !isSchedulerRunning;
+        });
 
         if (!isSchedulerRunning) break;
 
@@ -1498,16 +1496,8 @@ void admissionScheduler() {
             {
                 // Check memory requirement before locking the waiting queue
                 lock_guard<mutex> wait_lock(waiting_queue_mutex);
-                if (!waiting_for_memory_queue.empty()) {
-                    Process* next_proc = waiting_for_memory_queue.front();
-                    if (current_memory_used + next_proc->memorySize <= systemConfig.max_overall_mem) {
-                        proc_to_admit = next_proc;
-                        waiting_for_memory_queue.pop();
-                    }
-                    else {
-                        break; // Not enough memory for the next process, so stop trying
-                    }
-                }
+                proc_to_admit = waiting_for_memory_queue.front();
+                waiting_for_memory_queue.pop();
             }
 
             if (proc_to_admit) {
