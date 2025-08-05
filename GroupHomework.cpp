@@ -193,7 +193,8 @@ struct Process {
     int totalTasks; // Total number of instructions to execute
     bool isFinished;
     vector<ProcessInstruction> instructions; // Process instructions
-    unordered_map<string, int> variables;   // Process variables (Symbol Table)
+    unordered_map<string, int> variable_offsets; // Maps variable name to its offset in the symbol table (0-62)
+    int next_variable_offset; // Tracks the next available offset in the symbol table segment
 
     // === [NEW] === Memory and violation tracking members
     int memorySize; // Process-specific memory allocation
@@ -205,16 +206,17 @@ struct Process {
 
     unordered_map<int, PageTableEntry> pageTable; // For page allocator
 
-    // === [MODIFIED] === Updated constructor to include memory size
     Process(const string& processName, int memSize, int id = -1) :
         name(processName), memorySize(memSize), pid(id), startTime(0), endTime(0), core(-1),
-        tasksCompleted(0), totalTasks(0), isFinished(false), has_violation(false), currentInstructionIndex(0) {
+        tasksCompleted(0), totalTasks(0), isFinished(false), has_violation(false),
+        currentInstructionIndex(0), next_variable_offset(0) { // Initialize new member
     }
 
     // === [MODIFIED] === Updated default constructor
     Process()
         : name("unnamed"), memorySize(0), pid(-1), startTime(0), endTime(0), core(-1),
-        tasksCompleted(0), totalTasks(0), isFinished(false), has_violation(false), currentInstructionIndex(0) {
+        tasksCompleted(0), totalTasks(0), isFinished(false), has_violation(false),
+        currentInstructionIndex(0), next_variable_offset(0) { // Initialize new member
     }
 
 };
@@ -898,6 +900,38 @@ vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int 
     return instructions;
 }
 
+bool ensureSymbolTablePageLoaded(Process* process, ofstream& logFile, int coreId) {
+    int vpn = 0; // The symbol table is always located in Virtual Page Number 0.
+
+    // Check if the page is not valid (not in a frame)
+    if (process->pageTable.count(vpn) == 0 || !process->pageTable[vpn].valid) {
+        time_t now = time(0);
+        tm localtm;
+#ifdef _WIN32
+        localtime_s(&localtm, &now);
+#else
+        localtm = *localtime(&now);
+#endif
+        stringstream timestamp;
+        timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
+
+        logFile << timestamp.str() << " Core:" << coreId
+            << " SYMBOL TABLE PAGE FAULT. Attempting to load page " << vpn << "." << endl;
+        pageFaults++;
+
+        // Attempt to allocate a frame for this page
+        if (allocateFrameForPage(*process, vpn) == -1) {
+            logFile << timestamp.str() << " Core:" << coreId
+                << " FATAL: Page fault failed. No frame available. Process terminated." << endl;
+            process->isFinished = true;
+            process->has_violation = true; // Mark for termination
+            return false; // Fatal error
+        }
+        logFile << timestamp.str() << " Core:" << coreId << " Page " << vpn << " loaded successfully." << endl;
+    }
+    return true; // Page is now loaded and valid
+}
+
 /**
  * Execute a single process instruction
  */
@@ -913,7 +947,6 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     stringstream timestamp;
     timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
 
-    // === [MODIFIED] === Added logic for new instructions and symbol table limit
     switch (instr.type) {
     case ProcessInstruction::PRINT:
         logFile << timestamp.str() << " Core:" << coreId << " \"" << instr.message << "\"" << endl;
@@ -924,15 +957,27 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         }
         break;
 
-    case ProcessInstruction::DECLARE:
-        // Spec: Symbol table has fixed size of 64 bytes for max 32 variables.
-        if (process->variables.size() >= 32) {
+    case ProcessInstruction::DECLARE: {
+        // A variable declaration is a WRITE to the symbol table. Ensure page is loaded.
+        if (!ensureSymbolTablePageLoaded(process, logFile, coreId)) return false;
+
+        // Symbol table is 64 bytes. Each var is 2 bytes (uint16_t). Max 32 vars.
+        if (process->next_variable_offset >= 64) {
             logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name << " ignored. Symbol table full." << endl;
         }
         else {
-            process->variables[instr.var_name] = instr.value;
+            int offset = process->next_variable_offset;
+            process->variable_offsets[instr.var_name] = offset;
+            process->memory_space[offset] = instr.value; // Write value to virtual memory
+            process->next_variable_offset += 2; // Move to next slot
+
+            // Mark the page as dirty since we wrote to it
+            process->pageTable[0].dirty = true;
+            int frameNum = process->pageTable[0].frameNumber;
+            if (frameNum != -1) frameTable[frameNum].dirty = true;
+
             logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name
-                << " = " << instr.value << endl;
+                << " = " << instr.value << " at offset " << offset << endl;
             this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
             {
                 lock_guard<mutex> lock(processMutex);
@@ -940,35 +985,57 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             }
         }
         break;
+    }
 
     case ProcessInstruction::ADD:
-        if (process->variables.find(instr.var_name) == process->variables.end()) {
-            process->variables[instr.var_name] = 0; // Auto-declare with 0
+    case ProcessInstruction::SUBTRACT: {
+        // Accessing a variable requires reading and writing to the symbol table.
+        if (!ensureSymbolTablePageLoaded(process, logFile, coreId)) return false;
+
+        // Auto-declare if variable doesn't exist
+        if (process->variable_offsets.find(instr.var_name) == process->variable_offsets.end()) {
+            if (process->next_variable_offset >= 64) {
+                logFile << timestamp.str() << " Core:" << coreId << " "
+                    << (instr.type == ProcessInstruction::ADD ? "ADD" : "SUBTRACT")
+                    << " on " << instr.var_name << " ignored. Symbol table full." << endl;
+                break; // Don't complete the instruction
+            }
+            int offset = process->next_variable_offset;
+            process->variable_offsets[instr.var_name] = offset;
+            process->memory_space[offset] = 0; // Initialize with 0
+            process->next_variable_offset += 2;
         }
-        process->variables[instr.var_name] += instr.value;
-        logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.var_name
-            << " " << instr.value << " (result: " << process->variables[instr.var_name] << ")" << endl;
+
+        int offset = process->variable_offsets[instr.var_name];
+        uint16_t currentValue = process->memory_space[offset];
+
+        if (instr.type == ProcessInstruction::ADD) {
+            currentValue += instr.value;
+            logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.value
+                << " to " << instr.var_name;
+        }
+        else {
+            currentValue -= instr.value;
+            logFile << timestamp.str() << " Core:" << coreId << " SUBTRACT " << instr.value
+                << " from " << instr.var_name;
+        }
+
+        process->memory_space[offset] = currentValue; // Write back the result
+
+        // Mark the page as dirty
+        process->pageTable[0].dirty = true;
+        int frameNum = process->pageTable[0].frameNumber;
+        if (frameNum != -1) frameTable[frameNum].dirty = true;
+
+        logFile << " (result: " << currentValue << ")" << endl;
+
         this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
         {
             lock_guard<mutex> lock(processMutex);
             process->tasksCompleted++;
         }
         break;
-
-    case ProcessInstruction::SUBTRACT:
-
-        if (process->variables.find(instr.var_name) == process->variables.end()) {
-            process->variables[instr.var_name] = 0; // Auto-declare with 0
-        }
-        process->variables[instr.var_name] -= instr.value;
-        logFile << timestamp.str() << " Core:" << coreId << " SUBTRACT " << instr.var_name
-            << " " << instr.value << " (result: " << process->variables[instr.var_name] << ")" << endl;
-        this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
-        {
-            lock_guard<mutex> lock(processMutex);
-            process->tasksCompleted++;
-        }
-        break;
+    }
 
     case ProcessInstruction::SLEEP:
         logFile << timestamp.str() << " Core:" << coreId << " SLEEP " << instr.value << endl;
@@ -976,10 +1043,9 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
             lock_guard<mutex> lock(processMutex);
             process->tasksCompleted++;
         }
-        // Sleep for the specified number of cycles
         for (int i = 0; i < instr.value; ++i) {
             this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
-            if (!isSchedulerRunning) return false; // Allow early termination
+            if (!isSchedulerRunning) return false;
         }
         break;
 
@@ -992,65 +1058,70 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         for (int i = 0; i < instr.loop_count; ++i) {
             for (const auto& loopInstr : instr.loop_body) {
                 if (!executeInstruction(process, loopInstr, coreId, logFile)) {
-                    return false; // Early termination
+                    return false;
                 }
                 if (!isSchedulerRunning) return false;
             }
         }
         break;
 
-        // Execution logic for READ and WRITE
     case ProcessInstruction::READ: {
-        // Spec: check symbol table limit before adding a new variable via READ
-        if (process->variables.find(instr.var_name) == process->variables.end() &&
-            process->variables.size() >= 32) {
-            logFile << timestamp.str() << " Core:" << coreId
-                    << " READ into " << instr.var_name
-                    << " ignored. Symbol table full." << endl;
-            break;
-        }
-
         int addr = instr.memory_address;
 
-        
+        // Check for memory violation before proceeding
         if (addr < 0 || addr >= process->memorySize) {
             process->isFinished = true;
             process->has_violation = true;
             stringstream ss;
             ss << "0x" << hex << uppercase << addr;
             process->violation_address = ss.str();
-            logFile << timestamp.str() << " Core:" << coreId
-                    << " MEMORY VIOLATION on READ at " << process->violation_address
-                    << ". Process terminated." << endl;
+            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on READ at " << process->violation_address << ". Process terminated." << endl;
             return false;
         }
 
-        int vpn = addr / systemConfig.mem_per_frame;
-
-        
-        if (process->pageTable.count(vpn) == 0 || !process->pageTable[vpn].valid) {
+        // 1. Handle page fault for the source memory address
+        int vpn_source = addr / systemConfig.mem_per_frame;
+        if (process->pageTable.count(vpn_source) == 0 || !process->pageTable[vpn_source].valid) {
             pageFaults++;
-            if (allocateFrameForPage(*process, vpn) == -1) {
-                logFile << timestamp.str() << " Core:" << coreId
-                        << " PAGE FAULT FAILED on READ. Process terminated." << endl;
+            if (allocateFrameForPage(*process, vpn_source) == -1) {
+                logFile << timestamp.str() << " Core:" << coreId << " PAGE FAULT FAILED on READ. Process terminated." << endl;
                 process->isFinished = true;
                 process->has_violation = true;
                 return false;
             }
         }
+        process->pageTable[vpn_source].referenced = true;
 
-        process->pageTable[vpn].referenced = true;
+        // Read value from the source address
+        uint16_t value_read = process->memory_space.count(addr) ? process->memory_space.at(addr) : 0;
 
-        
-        uint16_t value_read = 0;
-        if (process->memory_space.count(addr)) {
-            value_read = process->memory_space.at(addr);
+        // 2. Handle page fault for the destination (the symbol table)
+        if (!ensureSymbolTablePageLoaded(process, logFile, coreId)) return false;
+
+        // Auto-declare if variable doesn't exist
+        int offset;
+        if (process->variable_offsets.find(instr.var_name) == process->variable_offsets.end()) {
+            if (process->next_variable_offset >= 64) {
+                logFile << timestamp.str() << " Core:" << coreId << " READ into " << instr.var_name << " ignored. Symbol table full." << endl;
+                break;
+            }
+            offset = process->next_variable_offset;
+            process->variable_offsets[instr.var_name] = offset;
+            process->next_variable_offset += 2;
         }
-        process->variables[instr.var_name] = value_read;
+        else {
+            offset = process->variable_offsets.at(instr.var_name);
+        }
 
-        logFile << timestamp.str() << " Core:" << coreId
-                << " READ " << instr.var_name << " from 0x" << hex
-                 << setw(4) << setfill('0') << addr << endl;
+        // Write the value to the symbol table in memory
+        process->memory_space[offset] = value_read;
+
+        // Mark the symbol table page as dirty
+        process->pageTable[0].dirty = true;
+        int frameNum = process->pageTable[0].frameNumber;
+        if (frameNum != -1) frameTable[frameNum].dirty = true;
+
+        logFile << timestamp.str() << " Core:" << coreId << " READ " << value_read << " from 0x" << hex << setw(4) << setfill('0') << addr << dec << " into " << instr.var_name << endl;
 
         this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
         {
@@ -1063,67 +1134,62 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     case ProcessInstruction::WRITE: {
         int addr = instr.memory_address;
 
-    // Bounds check
-    if (addr < 0 || addr >= process->memorySize) {
-        process->isFinished = true;
-        process->has_violation = true;
-        stringstream ss;
-        ss << "0x" << hex << uppercase << addr;
-        process->violation_address = ss.str();
-        logFile << timestamp.str() << " Core:" << coreId
-                << " MEMORY VIOLATION on WRITE at " << process->violation_address
-                << ". Process terminated." << endl;
-        return false;
-    }
-
-    // Page fault check
-    int vpn = addr / systemConfig.mem_per_frame;
-    if (process->pageTable.count(vpn) == 0 || !process->pageTable[vpn].valid) {
-        pageFaults++;
-        if (allocateFrameForPage(*process, vpn) == -1) {
-            logFile << timestamp.str() << " Core:" << coreId
-                    << " PAGE FAULT FAILED on WRITE. Process terminated." << endl;
+        // Bounds check for destination address
+        if (addr < 0 || addr >= process->memorySize) {
             process->isFinished = true;
             process->has_violation = true;
+            stringstream ss;
+            ss << "0x" << hex << uppercase << addr;
+            process->violation_address = ss.str();
+            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on WRITE at " << process->violation_address << ". Process terminated." << endl;
             return false;
         }
+
+        // 1. Get value from variable, which requires accessing the symbol table
+        if (!ensureSymbolTablePageLoaded(process, logFile, coreId)) return false;
+
+        uint16_t valueToWrite = 0;
+        if (process->variable_offsets.count(instr.var_name)) {
+            int offset = process->variable_offsets.at(instr.var_name);
+            if (process->memory_space.count(offset)) {
+                valueToWrite = process->memory_space.at(offset);
+            }
+        }
+
+        // 2. Page fault check for the destination address
+        int vpn_dest = addr / systemConfig.mem_per_frame;
+        if (process->pageTable.count(vpn_dest) == 0 || !process->pageTable[vpn_dest].valid) {
+            pageFaults++;
+            if (allocateFrameForPage(*process, vpn_dest) == -1) {
+                logFile << timestamp.str() << " Core:" << coreId << " PAGE FAULT FAILED on WRITE. Process terminated." << endl;
+                process->isFinished = true;
+                process->has_violation = true;
+                return false;
+            }
+        }
+
+        // Write the value to the destination address in memory
+        process->memory_space[addr] = valueToWrite;
+
+        // Mark destination page as dirty and referenced
+        process->pageTable[vpn_dest].referenced = true;
+        process->pageTable[vpn_dest].dirty = true;
+        int frameNum = process->pageTable[vpn_dest].frameNumber;
+        if (frameNum != -1) frameTable[frameNum].dirty = true;
+
+        logFile << timestamp.str() << " Core:" << coreId << " WRITE " << dec << valueToWrite << " (from " << instr.var_name << ") to 0x" << hex << setw(4) << setfill('0') << addr << dec << endl;
+
+        this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
+        {
+            lock_guard<mutex> lock(processMutex);
+            process->tasksCompleted++;
+        }
+        break;
     }
-
-    // Mark page dirty and referenced
-    process->pageTable[vpn].referenced = true;
-    process->pageTable[vpn].dirty = true;
-
-    int frameNum = process->pageTable[vpn].frameNumber;
-    if (frameNum >= 0 && frameNum < frameTable.size()) {
-        frameTable[frameNum].dirty = true;
     }
-
-    // Resolve value from variable
-    uint16_t valueToWrite = 0;
-    if (process->variables.count(instr.var_name)) {
-        valueToWrite = process->variables.at(instr.var_name);
-    }
-
-    // Store to memory
-    process->memory_space[addr] = valueToWrite;
-
-    // Fix: Ensure consistent decimal formatting in log
-    logFile << timestamp.str() << " Core:" << coreId
-            << " WRITE " << dec << valueToWrite << " to 0x" 
-            << hex << setw(4) << setfill('0') << addr << dec << endl;
-
-    this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
-    {
-        lock_guard<mutex> lock(processMutex);
-        process->tasksCompleted++;
-    }
-    break;
-}
-
-    }
-
     return true;
 }
+
 
 /**
  * Count total instructions (including loop iterations)
