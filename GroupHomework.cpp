@@ -2062,8 +2062,14 @@ int main() {
                         stringstream name;
                         name << "process" << setfill('0') << setw(2) << i;
 
+                        // Calculate a random, power-of-2 memory size
+                        int min_exp = log2(systemConfig.min_mem_per_proc);
+                        int max_exp = log2(systemConfig.max_mem_per_proc);
+                        int rand_exp = min_exp + (rand() % (max_exp - min_exp + 1));
+                        int random_mem_size = pow(2, rand_exp);
+
                         // === [MODIFIED] === Use new Process constructor
-                        Process newProc(name.str(), systemConfig.mem_per_proc);
+                        Process newProc(name.str(), random_mem_size);
                         newProc.instructions = generateProcessInstructions(systemConfig.min_ins, systemConfig.max_ins);
                         newProc.totalTasks = countTotalInstructions(newProc.instructions);
                         newProc.currentInstructionIndex = 0;
