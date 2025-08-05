@@ -29,57 +29,29 @@
 #include <cstdint> // For uint16_t
 #include <atomic> // For VMStat
 #include <regex> // For backing store
-#include <cmath>
+
 
 // ===================== Libraries - END ===================== //
 
 using namespace std;
 
+// ===================== Forward Declarations & Core Structs ===================== //
+
 void displayHeader();
 void displayMainMenu();
-// === [NEW] === Forward declaration for the instruction parser
 bool parseInstructionsString(const string& raw_instructions, vector<struct ProcessInstruction>& instructions);
 
 
-// ======================= Global Variables ======================= //
-
-bool isSchedulerRunning = false;
-bool isSystemInitialized = false; // New flag to track system initialization
-thread schedulerThread;
-vector<thread> cpu_workers;
-
-mutex processMutex; // Used for protecting shared resources like globalProcesses and cout
-vector<struct Process> globalProcesses; // List of all processes
-bool screenActive = false;
-
-// === [NEW] === Added mutex for the screens map to allow access from worker threads
-mutex screensMutex;
-unordered_map<string, class Screen> screens;
-
-
-// --- Threading & Scheduling Variables ---
-queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
-mutex queue_mutex;                  // Mutex to protect the ready_queue
-condition_variable scheduler_cv;    // Notifies worker threads about new processes
-
-// --- Memory Management Variables (REVISED/ADDED) ---
-int current_memory_used = 0;
-mutex memory_mutex;
-condition_variable memory_cv; // Notifies the admission scheduler about freed memory
-queue<struct Process*> waiting_for_memory_queue; // Processes waiting for memory allocation
-mutex waiting_queue_mutex;
-
-int quantumCycleCounter = 0;
-int nextPID = 1;
-
-// --- For VMStat ---
-atomic<int> pageFaults{0};
-atomic<int> pageReplacements{0};
-atomic<int> totalCpuTicks{0};
-atomic<int> activeCpuTicks{0};
-atomic<int> idleCpuTicks{0};
-
-// For Paging Allocator (PUT HERE cause it will error if not)
+/**
+ * Represents a physical memory frame in the system.
+ */
+struct FrameInfo {
+    bool isFree = true;
+    int ownerPID = -1;
+    int virtualPageNumber = -1; // Which virtual page is stored here
+    bool dirty = false;
+    bool referenced = false;
+};
 
 /**
  * Represents an entry in a process's page table.
@@ -92,24 +64,7 @@ struct PageTableEntry {
     bool referenced = false;
 };
 
-/**
- * Represents a physical memory frame in the system.
- */
-struct FrameInfo {
-    bool isFree = true;
-    int ownerPID = -1; 
-    int virtualPageNumber = -1; // Which virtual page is stored here
-    bool dirty = false;
-    bool referenced = false;
-};
-
-
-// -- For Demand Paging Allocator ---
-vector<FrameInfo> frameTable;
-mutex frameTableMutex;
-std::queue<int> frameEvictionQueue;
-
-// --- Configuration Variables ---
+// --- Configuration Struct ---
 struct SystemConfig {
     int num_cpu;
     string scheduler;
@@ -121,7 +76,7 @@ struct SystemConfig {
     // Memory allocation parameters
     int max_overall_mem;
     int mem_per_frame;
-    int min_mem_per_proc; 
+    int min_mem_per_proc;
     int max_mem_per_proc;
     // Constructor
     SystemConfig() :
@@ -134,9 +89,9 @@ struct SystemConfig {
         delay_per_exec(0),
         max_overall_mem(0),
         mem_per_frame(0),
-        min_mem_per_proc(0), 
+        min_mem_per_proc(0),
         max_mem_per_proc(0) {
-}
+    }
 
     // Method to validate configuration
     bool isValid() const {
@@ -151,15 +106,98 @@ struct SystemConfig {
             // New memory validation
             max_overall_mem > 0 &&
             mem_per_frame > 0 &&
-            min_mem_per_proc > 0 &&      
-            max_mem_per_proc > 0 &&      
-            max_mem_per_proc >= min_mem_per_proc && 
-            mem_per_frame <= max_overall_mem &&
-            max_mem_per_proc <= max_overall_mem; 
+            min_mem_per_proc > 0 &&
+            max_mem_per_proc > 0 &&
+            max_mem_per_proc >= min_mem_per_proc &&
+            mem_per_frame <= max_overall_mem;
+            //max_mem_per_proc <= max_overall_mem;
     }
-} systemConfig;
+};
+
+// --- Global System Configuration and Memory Structures ---
+SystemConfig systemConfig;
+vector<FrameInfo> frameTable;
+mutex frameTableMutex;
+std::queue<int> frameEvictionQueue;
+
+/**
+ * Page replacement class definition. Needs frameTable to be declared first.
+ */
+class ImprovedPageReplacement {
+private:
+    queue<pair<int, int>> pageQueue; // <frameIndex, timestamp>
+    int timestamp_counter = 0;
+    mutex replacement_mutex;
+
+public:
+    void addPage(int frameIndex) {
+        lock_guard<mutex> lock(replacement_mutex);
+        pageQueue.push({ frameIndex, timestamp_counter++ });
+    }
+
+    int evictPage() {
+        lock_guard<mutex> lock(replacement_mutex);
+
+        while (!pageQueue.empty()) {
+            auto [frameIndex, timestamp] = pageQueue.front();
+            pageQueue.pop();
+
+            // Verify frame is still valid for eviction
+            if (frameIndex >= 0 && frameIndex < frameTable.size() && !frameTable[frameIndex].isFree) {
+                return frameIndex;
+            }
+        }
+        return -1;
+    }
+
+    bool isEmpty() {
+        lock_guard<mutex> lock(replacement_mutex);
+        return pageQueue.empty();
+    }
+};
+
+
+// ======================= Global Variables ======================= //
+
+bool isSchedulerRunning = false;
+bool isSystemInitialized = false; // New flag to track system initialization
+thread schedulerThread;
+vector<thread> cpu_workers;
+
+mutex processMutex; // Used for protecting shared resources like globalProcesses and cout
+vector<struct Process> globalProcesses; // List of all processes
+bool screenActive = false;
+
+mutex screensMutex;
+unordered_map<string, class Screen> screens;
+
+// --- Threading & Scheduling Variables ---
+queue<struct Process*> ready_queue; // Queue of processes ready for CPU execution
+mutex queue_mutex;                  // Mutex to protect the ready_queue
+condition_variable scheduler_cv;    // Notifies worker threads about new processes
+
+// --- Memory Management Variables ---
+int current_memory_used = 0;
+mutex memory_mutex;
+condition_variable memory_cv; // Notifies the admission scheduler about freed memory
+queue<struct Process*> waiting_for_memory_queue; // Processes waiting for memory allocation
+mutex waiting_queue_mutex;
+
+int quantumCycleCounter = 0;
+int nextPID = 1;
+ImprovedPageReplacement pageReplacer;
+
+// --- For VMStat ---
+atomic<int> pageFaults{ 0 };
+atomic<int> pageReplacements{ 0 };
+atomic<int> totalCpuTicks{ 0 };
+atomic<int> activeCpuTicks{ 0 };
+atomic<int> idleCpuTicks{ 0 };
+
+mutex backing_store_mutex;
 
 // ===================== Global Variables - END ===================== //
+
 
 // ===================== Structures ===================== //
 
@@ -168,7 +206,7 @@ struct SystemConfig {
  */
 struct ProcessInstruction {
     enum Type {
-        PRINT, DECLARE, ADD, SUBTRACT, SLEEP, FOR_LOOP, READ, WRITE
+        PRINT, DECLARE, ADD, SUBTRACT, FOR_LOOP, READ, WRITE
     };
 
     Type type{}; // FIX: Initialize the enum
@@ -178,6 +216,11 @@ struct ProcessInstruction {
     vector<ProcessInstruction> loop_body;
     int loop_count = 0;
     int memory_address = 0;
+
+    bool is_three_operand = false; // For ADD var1 var2 var3
+    string arg1_var;
+    string arg2_var;
+    bool print_has_variable = false; // For PRINT "message" + var
 };
 
 /**
@@ -352,41 +395,87 @@ public:
 
 // ===================== Functions ===================== //
 
+
+bool checkMemoryViolation(int address, int processMemorySize, const string& operation, int pid, int coreId, ofstream& logFile) {
+    if (address < 0 || address >= processMemorySize) {
+        time_t now = time(0);
+        tm localtm;
+#ifdef _WIN32
+        localtime_s(&localtm, &now);
+#else
+        localtm = *localtime(&now);
+#endif
+        stringstream timestamp;
+        timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
+
+        stringstream violationAddr;
+        violationAddr << "0x" << hex << uppercase << address;
+
+        logFile << timestamp.str() << " Core:" << coreId
+            << " MEMORY VIOLATION: " << operation << " at address "
+            << violationAddr.str() << " (Process memory: 0x0 - 0x"
+            << hex << uppercase << (processMemorySize - 1) << dec << ")" << endl;
+
+        return true;
+    }
+    return false;
+}
+
 void savePageToBackingStore(int pid, int vpn, const unordered_map<int, uint16_t>& memory, int frameBaseAddr) {
-    ofstream backingFile("csopesy-backing-store.txt", ios::app);
-    if (!backingFile) return;
+    lock_guard<mutex> lock(backing_store_mutex);
 
-    backingFile << "PID=" << pid << " VPN=" << vpn << " DATA=";
+    // Read existing entries
+    unordered_map<string, string> entries;
+    ifstream inFile("csopesy-backing-store.txt");
+    string line;
+    regex entryPattern(R"(PID=(\d+)\s+VPN=(\d+)\s+DATA=.*)");
 
+    while (getline(inFile, line)) {
+        smatch match;
+        if (regex_match(line, match, entryPattern)) {
+            string key = match[1].str() + "_" + match[2].str();
+            entries[key] = line;
+        }
+    }
+    inFile.close();
+
+    // Create new entry
+    stringstream newEntry;
+    newEntry << "PID=" << pid << " VPN=" << vpn << " DATA=";
     for (int offset = 0; offset < systemConfig.mem_per_frame; offset += 2) {
         int addr = frameBaseAddr + offset;
-        uint16_t val = 0;
-
-        if (memory.count(addr)) {
-            val = memory.at(addr);
-        }
-
-        backingFile << setw(4) << setfill('0') << hex << uppercase << val << " ";
+        uint16_t val = memory.count(addr) ? memory.at(addr) : 0;
+        newEntry << setw(4) << setfill('0') << hex << uppercase << val << " ";
     }
 
-    backingFile << "\n";
-    backingFile.close();
+    // Update entry
+    string key = to_string(pid) + "_" + to_string(vpn);
+    entries[key] = newEntry.str();
+
+    // Write all entries back
+    ofstream outFile("csopesy-backing-store.txt");
+    for (const auto& entry : entries) {
+        outFile << entry.second << endl;
+    }
+    outFile.close();
 }
 
 bool loadPageFromBackingStore(int pid, int vpn, unordered_map<int, uint16_t>& memory, int frameBaseAddr) {
+    lock_guard<mutex> lock(backing_store_mutex);
+
     ifstream backingFile("csopesy-backing-store.txt");
     if (!backingFile) return false;
 
+    string key = to_string(pid) + "_" + to_string(vpn);
     string line;
     regex entryPattern(R"(PID=(\d+)\s+VPN=(\d+)\s+DATA=(.*))");
+    bool found = false;
 
     while (getline(backingFile, line)) {
         smatch match;
         if (regex_match(line, match, entryPattern)) {
-            int storedPid = stoi(match[1]);
-            int storedVpn = stoi(match[2]);
-
-            if (storedPid == pid && storedVpn == vpn) {
+            string currentKey = match[1].str() + "_" + match[2].str();
+            if (currentKey == key) {
                 istringstream dataStream(match[3]);
                 string hexVal;
                 int offset = 0;
@@ -397,21 +486,16 @@ bool loadPageFromBackingStore(int pid, int vpn, unordered_map<int, uint16_t>& me
                     memory[addr] = val;
                     offset += 2;
                 }
-
-                backingFile.close();
-                return true;
+                found = true;
+                break;
             }
         }
     }
-
     backingFile.close();
-    return false;
+    return found;
 }
 
-
 int assignFrameToPage(Process& process, int virtualPageNumber, int frameIndex) {
-    lock_guard<mutex> lock(frameTableMutex);
-    
     FrameInfo& frame = frameTable[frameIndex];
 
     frame.isFree = false;
@@ -437,9 +521,6 @@ int assignFrameToPage(Process& process, int virtualPageNumber, int frameIndex) {
     int baseAddr = virtualPageNumber * systemConfig.mem_per_frame;
     loadPageFromBackingStore(process.pid, virtualPageNumber, process.memory_space, baseAddr);
 
-    // Increment memory count
-    current_memory_used += systemConfig.mem_per_frame;
-
     return frameIndex;
 }
 
@@ -455,19 +536,16 @@ int evictFrame() {
         int evictedFrame = frameEvictionQueue.front();
         frameEvictionQueue.pop();
 
-        if (evictedFrame < 0 || evictedFrame >= frameTable.size()) {
+        if (evictedFrame < 0 || evictedFrame >= static_cast<int>(frameTable.size())) {
             continue;
         }
 
         FrameInfo& evicted = frameTable[evictedFrame];
-        if (evicted.isFree) continue;
-
         int evictedPID = evicted.ownerPID;
         int evictedVPN = evicted.virtualPageNumber;
-        bool savedToBackingStore = false;
 
         auto it = find_if(globalProcesses.begin(), globalProcesses.end(),
-                          [evictedPID](const Process& p) { return p.pid == evictedPID; });
+            [evictedPID](const Process& p) { return p.pid == evictedPID; });
 
         if (it != globalProcesses.end()) {
             Process& evictedProcess = *it;
@@ -476,15 +554,13 @@ int evictFrame() {
             if (evicted.dirty) {
                 int baseAddr = evictedVPN * systemConfig.mem_per_frame;
                 savePageToBackingStore(evictedProcess.pid, evictedVPN, evictedProcess.memory_space, baseAddr);
-                savedToBackingStore = true;
-                pageReplacements++;
             }
 
             // Invalidate the page in the page table
             if (evictedProcess.pageTable.count(evictedVPN)) {
                 evictedProcess.pageTable[evictedVPN].valid = false;
             }
-        } 
+        }
 
         // Reset the frame
         evicted.isFree = true;
@@ -493,7 +569,6 @@ int evictFrame() {
         evicted.dirty = false;
         evicted.referenced = false;
 
-        current_memory_used -= systemConfig.mem_per_frame;
         return evictedFrame;
     }
 
@@ -509,7 +584,7 @@ int allocateFrameForPage(Process& process, int virtualPageNumber) {
     for (size_t i = 0; i < frameTable.size(); ++i) {
         if (frameTable[i].isFree) {
             // Use the free frame
-            return assignFrameToPage(process, virtualPageNumber, i);
+            return assignFrameToPage(process, virtualPageNumber, static_cast<int>(i));
         }
     }
 
@@ -806,7 +881,7 @@ void initializeSystem() {
     cout << "├── Max Overall Memory: " << systemConfig.max_overall_mem << " KB" << endl;
     cout << "├── Memory per Frame: " << systemConfig.mem_per_frame << " KB" << endl;
     cout << "├── Min Memory per Process: " << systemConfig.min_mem_per_proc << " KB" << endl;
-    cout << "└── Max Memory per Process: " << systemConfig.max_mem_per_proc << " KB" << endl;   
+    cout << "└── Max Memory per Process: " << systemConfig.max_mem_per_proc << " KB" << endl;
     cout << string(50, '=') << endl;
 
     // Initialize Frame Table
@@ -831,83 +906,64 @@ void initializeSystem() {
 /**
  * Generate random process instructions based on config parameters
  */
-vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int maxInstructions) {
+ // In generateProcessInstructions function:
+vector<ProcessInstruction> generateProcessInstructions(int minInstructions, int maxInstructions, int processMemorySize) {
     vector<ProcessInstruction> instructions;
     int totalInstructions = minInstructions + (rand() % (maxInstructions - minInstructions + 1));
+
+    // Define available instruction types (excluding FOR_LOOP)
+    vector<ProcessInstruction::Type> availableTypes = {
+        ProcessInstruction::PRINT,
+        ProcessInstruction::DECLARE,
+        ProcessInstruction::ADD,
+        ProcessInstruction::SUBTRACT,
+        ProcessInstruction::READ,
+        ProcessInstruction::WRITE
+    };
 
     // Generate random instructions
     for (int i = 0; i < totalInstructions; ++i) {
         ProcessInstruction instr;
-        // === [MODIFIED] === Added READ/WRITE to random instruction generation
-        int instrType = rand() % 8; // 0-7 for different instruction types
+        instr.type = availableTypes[rand() % availableTypes.size()];
 
-        switch (instrType) {
-        case 0: // PRINT
-            instr.type = ProcessInstruction::PRINT;
+        switch (instr.type) {
+        case ProcessInstruction::PRINT:
             instr.message = "Hello world from process!";
             break;
 
-        case 1: // DECLARE
-            instr.type = ProcessInstruction::DECLARE;
-            instr.var_name = "var" + to_string(rand() % 10 + 1); // var1-var10
+        case ProcessInstruction::DECLARE:
+            instr.var_name = "var" + to_string(rand() % 10 + 1);
             instr.value = rand() % 100;
             break;
 
-        case 2: // ADD
-            instr.type = ProcessInstruction::ADD;
+        case ProcessInstruction::ADD:
             instr.var_name = "var" + to_string(rand() % 10 + 1);
             instr.value = rand() % 50 + 1;
             break;
 
-        case 3: // SUBTRACT
-            instr.type = ProcessInstruction::SUBTRACT;
+        case ProcessInstruction::SUBTRACT:
             instr.var_name = "var" + to_string(rand() % 10 + 1);
             instr.value = rand() % 50 + 1;
             break;
 
-        case 4: // SLEEP
-            instr.type = ProcessInstruction::SLEEP;
-            instr.value = rand() % 5 + 1; // Sleep for 1-5 cycles
-            break;
-
-        case 5: { // FOR_LOOP (simple, max 3 iterations)
-            instr.type = ProcessInstruction::FOR_LOOP;
-            instr.loop_count = rand() % 3 + 1; // 1-3 iterations
-            // Add a simple PRINT instruction inside the loop
-            ProcessInstruction loopInstr;
-            loopInstr.type = ProcessInstruction::PRINT;
-            loopInstr.message = "Loop iteration";
-            instr.loop_body.push_back(loopInstr);
-            break;
-        } // <--- Closing brace for the new scope
-
-            // === [NEW] === Logic for generating READ/WRITE instructions
-        case 6: {// READ
-            instr.type = ProcessInstruction::READ;
+        case ProcessInstruction::READ:
             instr.var_name = "var" + to_string(rand() % 10 + 1);
-            // Generate a random address within a 1KB space for testing
-            instr.memory_address = rand() % 1024;
+            instr.memory_address = rand() % processMemorySize;
             break;
-        }
-        case 7: // WRITE
-            instr.type = ProcessInstruction::WRITE;
-            // First, ensure a variable is declared to write from it
-            {
-                ProcessInstruction decl_instr;
-                decl_instr.type = ProcessInstruction::DECLARE;
-                decl_instr.var_name = "write_var" + to_string(rand() % 5);
-                decl_instr.value = rand() % 500;
-                instructions.push_back(decl_instr);
-                // Now setup the WRITE instruction
-                instr.var_name = decl_instr.var_name;
-            }
-            instr.memory_address = rand() % 1024;
-            break;
-        }
 
+        case ProcessInstruction::WRITE:
+            instr.var_name = "write_var" + to_string(rand() % 5);
+            instr.memory_address = rand() % processMemorySize;
+            // Add declaration for write variable
+            ProcessInstruction decl_instr;
+            decl_instr.type = ProcessInstruction::DECLARE;
+            decl_instr.var_name = instr.var_name;
+            decl_instr.value = rand() % 500;
+            instructions.push_back(decl_instr);
+            break;
+        }
         instructions.push_back(instr);
     }
-
     return instructions;
 }
 
@@ -959,14 +1015,32 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S %p)");
 
     switch (instr.type) {
-    case ProcessInstruction::PRINT:
-        logFile << timestamp.str() << " Core:" << coreId << " \"" << instr.message << "\"" << endl;
+    case ProcessInstruction::PRINT: {
+        string output = instr.message;
+        if (instr.print_has_variable) {
+            // This is the new format: message + variable
+            if (process->variable_offsets.count(instr.var_name)) {
+                int offset = process->variable_offsets.at(instr.var_name);
+                if (process->memory_space.count(offset)) {
+                    output += to_string(process->memory_space.at(offset));
+                }
+                else {
+                    output += "[uninitialized]";
+                }
+            }
+            else {
+                output += "[undeclared]";
+            }
+        }
+        // Log the final composed message
+        logFile << timestamp.str() << " Core:" << coreId << " \"" << output << "\"" << endl;
         this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
         {
             lock_guard<mutex> lock(processMutex);
             process->tasksCompleted++;
         }
         break;
+    }
 
     case ProcessInstruction::DECLARE: {
         // A variable declaration is a WRITE to the symbol table. Ensure page is loaded.
@@ -984,8 +1058,11 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
 
             // Mark the page as dirty since we wrote to it
             process->pageTable[0].dirty = true;
-            int frameNum = process->pageTable[0].frameNumber;
-            if (frameNum != -1) frameTable[frameNum].dirty = true;
+            {
+                lock_guard<mutex> lock(frameTableMutex);
+                int frameNum = process->pageTable[0].frameNumber;
+                if (frameNum != -1) frameTable[frameNum].dirty = true;
+            }
 
             logFile << timestamp.str() << " Core:" << coreId << " DECLARE " << instr.var_name
                 << " = " << instr.value << " at offset " << offset << endl;
@@ -1021,9 +1098,25 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         uint16_t currentValue = process->memory_space[offset];
 
         if (instr.type == ProcessInstruction::ADD) {
-            currentValue += instr.value;
-            logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.value
-                << " to " << instr.var_name;
+            if (instr.is_three_operand) {
+                // New format: ADD dest src1 src2
+                uint16_t val1 = 0, val2 = 0;
+                if (process->variable_offsets.count(instr.arg1_var)) {
+                    val1 = process->memory_space.at(process->variable_offsets.at(instr.arg1_var));
+                }
+                if (process->variable_offsets.count(instr.arg2_var)) {
+                    val2 = process->memory_space.at(process->variable_offsets.at(instr.arg2_var));
+                }
+                currentValue = val1 + val2;
+                logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.arg1_var << " + " << instr.arg2_var
+                    << " into " << instr.var_name;
+            }
+            else {
+                // Original format: ADD var value
+                currentValue += instr.value;
+                logFile << timestamp.str() << " Core:" << coreId << " ADD " << instr.value
+                    << " to " << instr.var_name;
+            }
         }
         else {
             currentValue -= instr.value;
@@ -1035,8 +1128,11 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
 
         // Mark the page as dirty
         process->pageTable[0].dirty = true;
-        int frameNum = process->pageTable[0].frameNumber;
-        if (frameNum != -1) frameTable[frameNum].dirty = true;
+        {
+            lock_guard<mutex> lock(frameTableMutex);
+            int frameNum = process->pageTable[0].frameNumber;
+            if (frameNum != -1) frameTable[frameNum].dirty = true;
+        }
 
         logFile << " (result: " << currentValue << ")" << endl;
 
@@ -1048,45 +1144,23 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         break;
     }
 
-    case ProcessInstruction::SLEEP:
-        logFile << timestamp.str() << " Core:" << coreId << " SLEEP " << instr.value << endl;
-        {
-            lock_guard<mutex> lock(processMutex);
-            process->tasksCompleted++;
-        }
-        for (int i = 0; i < instr.value; ++i) {
-            this_thread::sleep_for(chrono::milliseconds(systemConfig.delay_per_exec));
-            if (!isSchedulerRunning) return false;
-        }
-        break;
-
-    case ProcessInstruction::FOR_LOOP:
-        logFile << timestamp.str() << " Core:" << coreId << " FOR_LOOP " << instr.loop_count << " iterations" << endl;
-        {
-            lock_guard<mutex> lock(processMutex);
-            process->tasksCompleted++;
-        }
-        for (int i = 0; i < instr.loop_count; ++i) {
-            for (const auto& loopInstr : instr.loop_body) {
-                if (!executeInstruction(process, loopInstr, coreId, logFile)) {
-                    return false;
-                }
-                if (!isSchedulerRunning) return false;
-            }
-        }
-        break;
+  
 
     case ProcessInstruction::READ: {
         int addr = instr.memory_address;
 
+        // Fix: Memory size is in KB, convert to bytes properly
+        int memoryInBytes = process->memorySize; // memorySize is already in bytes based on screen creation
+
         // Check for memory violation before proceeding
-        if (addr < 0 || addr >= process->memorySize) {
+        if (addr < 0 || addr >= memoryInBytes) {
             process->isFinished = true;
             process->has_violation = true;
             stringstream ss;
             ss << "0x" << hex << uppercase << addr;
             process->violation_address = ss.str();
-            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on READ at " << process->violation_address << ". Process terminated." << endl;
+            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on READ at " << process->violation_address
+                << ". Valid range: 0x0 - 0x" << hex << uppercase << (memoryInBytes - 1) << dec << ". Process terminated." << endl;
             return false;
         }
 
@@ -1129,8 +1203,11 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
 
         // Mark the symbol table page as dirty
         process->pageTable[0].dirty = true;
-        int frameNum = process->pageTable[0].frameNumber;
-        if (frameNum != -1) frameTable[frameNum].dirty = true;
+        {
+            lock_guard<mutex> lock(frameTableMutex);
+            int frameNum = process->pageTable[0].frameNumber;
+            if (frameNum != -1) frameTable[frameNum].dirty = true;
+        }
 
         logFile << timestamp.str() << " Core:" << coreId << " READ " << value_read << " from 0x" << hex << setw(4) << setfill('0') << addr << dec << " into " << instr.var_name << endl;
 
@@ -1145,14 +1222,18 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     case ProcessInstruction::WRITE: {
         int addr = instr.memory_address;
 
+        // Fix: Memory size is in KB, convert to bytes properly  
+        int memoryInBytes = process->memorySize; // memorySize is already in bytes based on screen creation
+
         // Bounds check for destination address
-        if (addr < 0 || addr >= process->memorySize) {
+        if (addr < 0 || addr >= memoryInBytes) {
             process->isFinished = true;
             process->has_violation = true;
             stringstream ss;
             ss << "0x" << hex << uppercase << addr;
             process->violation_address = ss.str();
-            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on WRITE at " << process->violation_address << ". Process terminated." << endl;
+            logFile << timestamp.str() << " Core:" << coreId << " MEMORY VIOLATION on WRITE at " << process->violation_address
+                << ". Valid range: 0x0 - 0x" << hex << uppercase << (memoryInBytes - 1) << dec << ". Process terminated." << endl;
             return false;
         }
 
@@ -1185,8 +1266,11 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
         // Mark destination page as dirty and referenced
         process->pageTable[vpn_dest].referenced = true;
         process->pageTable[vpn_dest].dirty = true;
-        int frameNum = process->pageTable[vpn_dest].frameNumber;
-        if (frameNum != -1) frameTable[frameNum].dirty = true;
+        {
+            lock_guard<mutex> lock(frameTableMutex);
+            int frameNum = process->pageTable[vpn_dest].frameNumber;
+            if (frameNum != -1) frameTable[frameNum].dirty = true;
+        }
 
         logFile << timestamp.str() << " Core:" << coreId << " WRITE " << dec << valueToWrite << " (from " << instr.var_name << ") to 0x" << hex << setw(4) << setfill('0') << addr << dec << endl;
 
@@ -1199,6 +1283,251 @@ bool executeInstruction(Process* process, const ProcessInstruction& instr, int c
     }
     }
     return true;
+}
+
+void displayProcessSMI() {
+    vector<tuple<string, int, int, int, bool, bool, string, int, int>> processInfos;
+    int totalMemUsed = 0;
+
+    {
+        lock_guard<mutex> proc_lock(processMutex);
+        lock_guard<mutex> mem_lock(memory_mutex);
+        totalMemUsed = current_memory_used;
+
+        for (const auto& proc : globalProcesses) {
+            int framesUsed = 0;
+            int validPages = 0;
+
+            // Count frames and valid pages for this process
+            for (const auto& [vpn, pageEntry] : proc.pageTable) {
+                if (pageEntry.valid) {
+                    validPages++;
+                    framesUsed++;
+                }
+            }
+
+            processInfos.emplace_back(
+                proc.name,
+                proc.core,
+                proc.tasksCompleted,
+                proc.totalTasks,
+                proc.isFinished,
+                proc.has_violation,
+                proc.violation_address,
+                proc.memorySize,
+                validPages
+            );
+        }
+    }
+
+    cout << "\n=== PROCESS-SMI REPORT ===" << endl;
+    cout << "Total Memory Used: " << totalMemUsed << " / " << systemConfig.max_overall_mem << " KB" << endl;
+    cout << "Total Frames: " << (systemConfig.max_overall_mem / systemConfig.mem_per_frame) << endl;
+    cout << "Frame Size: " << systemConfig.mem_per_frame << " KB" << endl;
+    cout << string(80, '=') << endl;
+
+    int idx = 1;
+    for (const auto& info : processInfos) {
+        auto& [name, core, completed, total, isFinished, has_violation, violation_addr, memSize, validPages] = info;
+
+        cout << "\n== Process " << idx++ << " ==" << endl;
+        cout << "Name: " << name << endl;
+        cout << "PID: " << (idx - 1) << endl;
+        cout << "Core: " << (core == -1 ? "N/A" : to_string(core)) << endl;
+        cout << "Memory Allocated: " << memSize << " KB" << endl;
+        cout << "Pages in Memory: " << validPages << " / " << (memSize / systemConfig.mem_per_frame) << endl;
+        cout << "Progress: " << completed << " / " << total << " instructions" << endl;
+
+        string status;
+        if (isFinished) {
+            status = has_violation ? "Terminated (Memory Violation)" : "Finished";
+            if (has_violation) {
+                cout << "Violation Address: " << violation_addr << endl;
+            }
+        }
+        else {
+            status = (core == -1) ? "Waiting for CPU" : "Running";
+        }
+        cout << "Status: " << status << endl;
+
+        // Show recent log entries
+        cout << "-- Recent Log Entries --" << endl;
+        string logFileName = name + ".txt";
+        ifstream infile(logFileName);
+        if (infile.is_open()) {
+            vector<string> lines;
+            string line;
+            while (getline(infile, line)) {
+                lines.push_back(line);
+            }
+            infile.close();
+
+            int startIdx = max(0, static_cast<int>(lines.size()) - 3);
+            for (int i = startIdx; i < lines.size(); i++) {
+                cout << "  " << lines[i] << endl;
+            }
+        }
+        else {
+            cout << "  (No log file found)" << endl;
+        }
+        cout << string(50, '-') << endl;
+    }
+}
+
+void generateDetailedMemorySnapshot(int quantumCycle) {
+    time_t now = time(0);
+    tm localtm;
+#ifdef _WIN32
+    localtime_s(&localtm, &now);
+#else
+    localtm = *localtime(&now);
+#endif
+    stringstream timestamp;
+    timestamp << put_time(&localtm, "(%m/%d/%Y %I:%M:%S%p)");
+
+    // Collect memory layout information
+    vector<tuple<int, string, int, int, int>> memoryLayout; // end, name, start, pid, pages_in_memory
+    int nextAddress = 0;
+    int totalProcesses = 0;
+    int totalPagesInMemory = 0;
+
+    {
+        lock_guard<mutex> lock(processMutex);
+        lock_guard<mutex> frame_lock(frameTableMutex);
+
+        for (const auto& proc : globalProcesses) {
+            if (!proc.isFinished && proc.startTime != 0) {
+                int start = nextAddress;
+                int end = start + proc.memorySize;
+
+                // Count pages in memory for this process
+                int pagesInMemory = 0;
+                for (const auto& [vpn, pageEntry] : proc.pageTable) {
+                    if (pageEntry.valid) {
+                        pagesInMemory++;
+                    }
+                }
+                totalPagesInMemory += pagesInMemory;
+
+                memoryLayout.emplace_back(end, proc.name, start, proc.pid, pagesInMemory);
+                nextAddress = end;
+                totalProcesses++;
+            }
+        }
+    }
+
+    int totalExternalFragmentation = systemConfig.max_overall_mem - nextAddress;
+    int totalFrames = systemConfig.max_overall_mem / systemConfig.mem_per_frame;
+
+    // Count free frames
+    int freeFrames = 0;
+    {
+        lock_guard<mutex> frame_lock(frameTableMutex);
+        for (const auto& frame : frameTable) {
+            if (frame.isFree) freeFrames++;
+        }
+    }
+
+    stringstream filename;
+    filename << "memory_stamp_" << setfill('0') << setw(2) << quantumCycle << ".txt";
+    ofstream outfile(filename.str());
+    if (!outfile.is_open()) return;
+
+    outfile << "Memory Snapshot " << timestamp.str() << endl;
+    outfile << "Quantum Cycle: " << quantumCycle << endl;
+    outfile << "Number of processes in memory: " << totalProcesses << endl;
+    outfile << "Total pages in memory: " << totalPagesInMemory << " / " << totalFrames << endl;
+    outfile << "Free frames: " << freeFrames << endl;
+    outfile << "External fragmentation: " << totalExternalFragmentation << " KB" << endl;
+    outfile << string(60, '=') << endl;
+
+    // Sort by end address (descending for the format requirement)
+    sort(memoryLayout.begin(), memoryLayout.end(), [](const tuple<int, string, int, int, int>& a, const tuple<int, string, int, int, int>& b) {
+        return get<0>(a) > get<0>(b);
+        });
+
+    outfile << "----end---- = " << systemConfig.max_overall_mem << endl;
+    for (const auto& [end, name, start, pid, pagesInMem] : memoryLayout) {
+        outfile << end << endl;
+        outfile << name << " (PID:" << pid << ", Pages:" << pagesInMem << ")" << endl;
+        outfile << start << endl;
+    }
+    outfile << "----start-- = 0" << endl;
+
+    outfile.close();
+}
+
+void printEnhancedVMStat() {
+    lock_guard<mutex> procLock(processMutex);
+    lock_guard<mutex> queueLock(queue_mutex);
+    lock_guard<mutex> waitLock(waiting_queue_mutex);
+    lock_guard<mutex> memLock(memory_mutex);
+    lock_guard<mutex> frameLock(frameTableMutex);
+
+    int totalMemBytes = systemConfig.max_overall_mem * 1024;
+    int usedMemBytes = current_memory_used * 1024;
+    int freeMemBytes = totalMemBytes - usedMemBytes;
+
+    // Count frame statistics
+    int totalFrames = frameTable.size();
+    int usedFrames = 0;
+    int dirtyFrames = 0;
+
+    for (const auto& frame : frameTable) {
+        if (!frame.isFree) {
+            usedFrames++;
+            if (frame.dirty) dirtyFrames++;
+        }
+    }
+
+    int freeFrames = totalFrames - usedFrames;
+
+    // Count process statistics
+    int runningProcs = 0, waitingProcs = 0, finishedProcs = 0;
+    for (const auto& proc : globalProcesses) {
+        if (proc.isFinished) finishedProcs++;
+        else if (proc.startTime != 0) runningProcs++;
+        else waitingProcs++;
+    }
+
+    cout << "\n" << string(50, '=') << endl;
+    cout << "           VIRTUAL MEMORY STATISTICS" << endl;
+    cout << string(50, '=') << endl;
+
+    cout << "\n[MEMORY USAGE]" << endl;
+    cout << "Total Memory         : " << setw(10) << totalMemBytes << " bytes" << endl;
+    cout << "Used Memory          : " << setw(10) << usedMemBytes << " bytes" << endl;
+    cout << "Free Memory          : " << setw(10) << freeMemBytes << " bytes" << endl;
+    cout << "Memory Utilization   : " << setw(9) << fixed << setprecision(1)
+        << (totalMemBytes > 0 ? (double)usedMemBytes / totalMemBytes * 100 : 0) << "%" << endl;
+
+    cout << "\n[FRAME STATISTICS]" << endl;
+    cout << "Total Frames         : " << setw(10) << totalFrames << endl;
+    cout << "Used Frames          : " << setw(10) << usedFrames << endl;
+    cout << "Free Frames          : " << setw(10) << freeFrames << endl;
+    cout << "Dirty Frames         : " << setw(10) << dirtyFrames << endl;
+    cout << "Frame Size           : " << setw(10) << systemConfig.mem_per_frame << " KB" << endl;
+
+    cout << "\n[CPU STATISTICS]" << endl;
+    cout << "Total CPU Ticks      : " << setw(10) << totalCpuTicks.load() << endl;
+    cout << "Active CPU Ticks     : " << setw(10) << activeCpuTicks.load() << endl;
+    cout << "Idle CPU Ticks       : " << setw(10) << idleCpuTicks.load() << endl;
+    cout << "CPU Utilization      : " << setw(9) << fixed << setprecision(1)
+        << (totalCpuTicks.load() > 0 ? (double)activeCpuTicks.load() / totalCpuTicks.load() * 100 : 0) << "%" << endl;
+
+    cout << "\n[PAGING STATISTICS]" << endl;
+    cout << "Page Faults          : " << setw(10) << pageFaults.load() << endl;
+    cout << "Pages Paged Out      : " << setw(10) << pageReplacements.load() << endl;
+    cout << "Page Fault Rate      : " << setw(9) << fixed << setprecision(3)
+        << (totalCpuTicks.load() > 0 ? (double)pageFaults.load() / totalCpuTicks.load() : 0) << endl;
+
+    cout << "\n[PROCESS STATISTICS]" << endl;
+    cout << "Running Processes    : " << setw(10) << runningProcs << endl;
+    cout << "Waiting Processes    : " << setw(10) << waitingProcs << endl;
+    cout << "Finished Processes   : " << setw(10) << finishedProcs << endl;
+    cout << "Total Processes      : " << setw(10) << globalProcesses.size() << endl;
+
+    cout << "\n" << string(50, '=') << endl;
 }
 
 
@@ -1233,8 +1562,8 @@ void displaySchedulerUI(const vector<Process>& processes) {
     displayHeader();
 
     // Lock memory and process data to ensure consistent reads
-    lock_guard<mutex> mem_lock(memory_mutex);
     lock_guard<mutex> proc_lock(processMutex);
+    lock_guard<mutex> screen_lock(screensMutex);
 
     // Calculate CPU utilization and process statistics
     int totalCores = systemConfig.num_cpu;
@@ -1356,7 +1685,21 @@ void displaySchedulerUI(const vector<Process>& processes) {
     cout << "======================================" << endl;
 }
 
-
+void releaseProcessFrames(Process* process) {
+    lock_guard<mutex> lock(frameTableMutex);
+    for (auto const& [vpn, page_entry] : process->pageTable) {
+        if (page_entry.valid) {
+            int frameNum = page_entry.frameNumber;
+            if (frameNum >= 0 && frameNum < frameTable.size()) {
+                frameTable[frameNum].isFree = true;
+                frameTable[frameNum].ownerPID = -1;
+                frameTable[frameNum].virtualPageNumber = -1;
+                frameTable[frameNum].dirty = false;
+                frameTable[frameNum].referenced = false;
+            }
+        }
+    }
+}
 /**
  * @brief This is the main function for each CPU worker thread.
  * REVISED: When a process finishes, it now releases its memory and
@@ -1379,7 +1722,8 @@ void cpu_worker_main(int coreId) {
             if (!ready_queue.empty()) {
                 currentProcess = ready_queue.front();
                 ready_queue.pop();
-            } else {
+            }
+            else {
                 // Idle tick
                 totalCpuTicks++;
                 idleCpuTicks++;
@@ -1422,44 +1766,53 @@ void cpu_worker_main(int coreId) {
                 executedInstructions++;
                 totalCpuTicks++;
                 activeCpuTicks++;
-                generateMemorySnapshot(quantumCycleCounter++);
+                generateDetailedMemorySnapshot(quantumCycleCounter++);
             }
 
             outfile.close();
 
             // Check if process finished
             bool finished = false;
+            bool violation_occurred = false;
             {
                 lock_guard<mutex> lock(processMutex);
-                // A process is finished if its instruction index is out of bounds OR it has a violation
                 if (currentProcess->currentInstructionIndex >= currentProcess->instructions.size() || currentProcess->has_violation) {
                     currentProcess->endTime = time(nullptr);
                     currentProcess->isFinished = true;
                     finished = true;
-
-                    // === [NEW] === If a violation occurred, update the associated Screen object for Eryl's task
                     if (currentProcess->has_violation) {
-                        lock_guard<mutex> screen_lock(screensMutex);
-                        if (screens.count(currentProcess->name)) {
-                            screens.at(currentProcess->name).triggerMemoryViolation(currentProcess->violation_address);
-                        }
+                        violation_occurred = true;
                     }
                 }
             }
 
-            // If finished, release memory and notify admission scheduler. (REVISED)
+            // If a violation occurred, we now lock BOTH mutexes in the correct order to update the screen
+            if (violation_occurred) {
+                lock_guard<mutex> proc_lock(processMutex);
+                lock_guard<mutex> screen_lock(screensMutex);
+                if (screens.count(currentProcess->name)) {
+                    screens.at(currentProcess->name).triggerMemoryViolation(currentProcess->violation_address);
+                }
+            }
+
+            // If finished, release memory and frames
+            // If finished, release memory and frames
             if (finished) {
+                releaseProcessFrames(currentProcess);
                 {
                     lock_guard<mutex> mem_lock(memory_mutex);
-                    current_memory_used -= currentProcess->memorySize;
+                    //current_memory_used -= currentProcess->memorySize;
                 }
                 memory_cv.notify_one(); // Signal that memory has been freed
             }
-            // Requeue if not finished (RR only)
-            else if (systemConfig.scheduler == "rr" && isSchedulerRunning) {
-                lock_guard<mutex> lock(queue_mutex);
-                ready_queue.push(currentProcess);
-                scheduler_cv.notify_one();
+            // === [FIX] ===
+            // If the process is NOT finished and scheduler is RR, put it back on the queue.
+            else if (systemConfig.scheduler == "rr") {
+                {
+                    lock_guard<mutex> lock(queue_mutex);
+                    ready_queue.push(currentProcess);
+                }
+                // Don't need to notify here, the worker will just loop and grab the next process.
             }
         }
     }
@@ -1474,46 +1827,48 @@ void cpu_worker_main(int coreId) {
  */
 void admissionScheduler() {
     // --- Start all CPU worker threads ---
-    cpu_workers.clear(); // Clear any previous worker threads
+    cpu_workers.clear();
     for (int i = 0; i < systemConfig.num_cpu; ++i) {
         cpu_workers.emplace_back(cpu_worker_main, i);
     }
 
     // --- Main admission loop ---
     while (isSchedulerRunning) {
-        unique_lock<mutex> lock(memory_mutex);
+        Process* proc_to_admit = nullptr;
+        {
+            // This lock is to safely check the waiting queue and memory usage
+            lock_guard<mutex> mem_lock(memory_mutex);
+            lock_guard<mutex> wait_lock(waiting_queue_mutex);
 
-        // === [MODIFIED] === Admission logic now checks process-specific memory size
-        memory_cv.wait(lock, [] {
-            return !waiting_for_memory_queue.empty() || !isSchedulerRunning;
-        });
-
-        if (!isSchedulerRunning) break;
-
-        // Admit all possible processes while memory is available
-        while (!waiting_for_memory_queue.empty()) {
-            Process* proc_to_admit = nullptr;
-            {
-                // Check memory requirement before locking the waiting queue
-                lock_guard<mutex> wait_lock(waiting_queue_mutex);
-                proc_to_admit = waiting_for_memory_queue.front();
+            if (!waiting_for_memory_queue.empty()) {
+                Process* next_proc = waiting_for_memory_queue.front();
+                // ALWAYS admit the next process. Let the page allocator handle memory.
+                proc_to_admit = next_proc;
                 waiting_for_memory_queue.pop();
             }
+        }
 
-            if (proc_to_admit) {
-                current_memory_used += proc_to_admit->memorySize;
+        if (proc_to_admit) {
+            // If we found a process to admit, update memory and push to ready queue
+            // The memory_mutex is already locked from the outer scope, so we can safely update this.
+            //current_memory_used += proc_to_admit->memorySize;
 
-                {
-                    lock_guard<mutex> ready_lock(queue_mutex);
-                    ready_queue.push(proc_to_admit);
-                }
-                scheduler_cv.notify_one(); // Notify one worker
+            {
+                lock_guard<mutex> ready_lock(queue_mutex);
+                ready_queue.push(proc_to_admit);
             }
+            scheduler_cv.notify_one(); // Notify one worker
+        }
+
+        else {
+            // If we couldn't admit a process, sleep for a short time to prevent
+            // this loop from running at 100% CPU when memory is full.
+            this_thread::sleep_for(chrono::milliseconds(50));
         }
     }
 
     // --- Cleanup: Wait for all worker threads to complete ---
-    scheduler_cv.notify_all(); // Wake up any sleeping workers so they can exit
+    scheduler_cv.notify_all();
     for (auto& worker : cpu_workers) {
         if (worker.joinable()) {
             worker.join();
@@ -1753,18 +2108,34 @@ bool parseInstructionsString(const string& raw_instructions, vector<ProcessInstr
             }
             else { success = false; }
         }
+
+       
+
         else if (command == "ADD") {
-            string var, val_str;
-            if (line_ss >> var >> val_str) {
+            string arg1, arg2, arg3;
+            line_ss >> arg1 >> arg2;
+
+            // Check if there's a third argument
+            if (line_ss >> arg3) {
+                // Handle three-operand ADD: ADD dest src1 src2
                 instr.type = ProcessInstruction::ADD;
-                instr.var_name = var;
+                instr.is_three_operand = true;
+                instr.var_name = arg1; // Destination
+                instr.arg1_var = arg2; // Source 1
+                instr.arg2_var = arg3; // Source 2
+            }
+            else {
+                // Handle original two-operand ADD: ADD var value
+                instr.type = ProcessInstruction::ADD;
+                instr.is_three_operand = false;
+                instr.var_name = arg1;
                 try {
-                    instr.value = stoi(val_str);
+                    instr.value = stoi(arg2);
                 }
                 catch (...) { success = false; }
             }
-            else { success = false; }
         }
+
         else if (command == "SUBTRACT") {
             string var, val_str;
             if (line_ss >> var >> val_str) {
@@ -1802,19 +2173,29 @@ bool parseInstructionsString(const string& raw_instructions, vector<ProcessInstr
             else { success = false; }
         }
         else if (command == "PRINT") {
-            // Simple version: PRINT "message here"
-            string message;
-            // find the first quote
-            size_t first_quote = segment.find('"');
-            size_t last_quote = segment.rfind('"');
-            if (first_quote != string::npos && last_quote != string::npos && first_quote != last_quote) {
-                instr.type = ProcessInstruction::PRINT;
-                instr.message = segment.substr(first_quote + 1, last_quote - first_quote - 1);
+            instr.type = ProcessInstruction::PRINT;
+            // A more robust regex to parse: PRINT("message" + variable)
+            // It specifically captures characters that are NOT a quote for the message part.
+            static const regex print_pattern(R"(PRINT\s*\(\s*\"([^"]*)\"\s*\+\s*(\w+)\s*\))");
+            smatch match;
+
+            if (regex_match(segment, match, print_pattern)) {
+                // A successful match will have 3 parts:
+                // match[0]: The entire matched string
+                // match[1]: The message (any character except a quote)
+                // match[2]: The variable name
+                if (match.size() == 3) {
+                    instr.print_has_variable = true;
+                    instr.message = match[1].str();
+                    instr.var_name = match[2].str();
+                }
+                else {
+                    success = false;
+                }
             }
-            else { success = false; }
-        }
-        else {
-            success = false; // Unknown command
+            else {
+                success = false;
+            }
         }
 
         if (success) {
@@ -1885,47 +2266,16 @@ int main() {
         }
         else if (command == "clear") {
             if (inScreen) {
-                lock_guard<mutex> lock(screensMutex);
+                lock_guard<mutex> screen_lock(screensMutex);
                 screens[currentScreen].display();
             }
             else {
                 displayMainMenu();
             }
         }
+        // In the 'process-smi' command block:
         else if (command == "process-smi") {
-            lock_guard<mutex> lock(processMutex);
-            int idx = 1;
-            for (const auto& proc : globalProcesses) {
-                cout << "\n== Process " << idx++ << " ==\n";
-                cout << "Name: " << proc.name << "\n";
-                cout << "Core: " << (proc.core == -1 ? "N/A" : to_string(proc.core)) << "\n";
-                cout << "Progress: " << proc.tasksCompleted << " / " << proc.totalTasks << "\n";
-
-                string status;
-                if (proc.isFinished) {
-                    status = proc.has_violation ? "Terminated (Violation)" : "Finished!";
-                }
-                else if (proc.startTime != 0) status = "Running";
-                else status = "Waiting for Memory";
-                cout << "Status: " << status << "\n";
-
-                cout << "-- Log Output --\n";
-                string logFileName = proc.name + ".txt";
-                ifstream infile(logFileName);
-                if (infile.is_open()) {
-                    string line;
-                    int count = 0;
-                    while (getline(infile, line) && count < 5) {
-                        cout << "  " << line << "\n";
-                        count++;
-                    }
-                    if (count > 0) cout << "  (See " << logFileName << " for full log)\n";
-                    infile.close();
-                }
-                else {
-                    cout << "  (No log found)\n";
-                }
-            }
+            displayProcessSMI();
         }
         else if (command.rfind("screen -s ", 0) == 0) {
             if (inScreen) {
@@ -2019,13 +2369,16 @@ int main() {
                 continue;
             }
 
-            scoped_lock lock(screensMutex, processMutex);
-
-
+            // Check for name conflicts - lock mutexes in consistent order
             bool name_exists = false;
-            if (screens.count(name)) name_exists = true;
-            for (const auto& p : globalProcesses) {
-                if (p.name == name) name_exists = true;
+            {
+                lock_guard<mutex> create_check_lock(processMutex); // Changed from proc_lock
+                lock_guard<mutex> screen_lock(screensMutex);
+
+                if (screens.count(name)) name_exists = true;
+                for (const auto& p : globalProcesses) {
+                    if (p.name == name) name_exists = true;
+                }
             }
 
             if (name_exists) {
@@ -2039,27 +2392,33 @@ int main() {
                 continue;
             }
 
-            // Create the Screen and Process
-            screens[name] = Screen(name, memorySize, countTotalInstructions(instructions));
+            // Create the Screen and Process - lock mutexes in consistent order
+            {
+                lock_guard<mutex> create_add_lock(processMutex); // Changed from proc_lock
+                lock_guard<mutex> screen_lock(screensMutex);
 
-            int pid = nextPID++;
-            Process newProc(name, memorySize, pid);
-            newProc.instructions = instructions;
-            newProc.totalTasks = countTotalInstructions(instructions);
 
-            // Initialize Page Table
-            int numPages = memorySize / systemConfig.mem_per_frame;
-            for (int vpn = 0; vpn < numPages; ++vpn) {
-                PageTableEntry entry;
-                entry.virtualPageNumber = vpn;
-                entry.valid = false; // Page not yet in memory
-                entry.frameNumber = -1;
-                entry.dirty = false;
-                entry.referenced = false;
-                newProc.pageTable[vpn] = entry;
+                screens[name] = Screen(name, memorySize, countTotalInstructions(instructions));
+
+                int pid = nextPID++;
+                Process newProc(name, memorySize, pid);
+                newProc.instructions = instructions;
+                newProc.totalTasks = countTotalInstructions(newProc.instructions);
+
+                // Initialize Page Table
+                int numPages = memorySize / systemConfig.mem_per_frame;
+                for (int vpn = 0; vpn < numPages; ++vpn) {
+                    PageTableEntry entry;
+                    entry.virtualPageNumber = vpn;
+                    entry.valid = false; // Page not yet in memory
+                    entry.frameNumber = -1;
+                    entry.dirty = false;
+                    entry.referenced = false;
+                    newProc.pageTable[vpn] = entry;
+                }
+
+                globalProcesses.push_back(move(newProc));
             }
-
-            globalProcesses.push_back(move(newProc));
 
             // Add to waiting queue for admission
             {
@@ -2069,8 +2428,9 @@ int main() {
             memory_cv.notify_one(); // Notify admission scheduler of new process
 
             cout << "Process \"" << name << "\" created with " << memorySize << " bytes and " << instructions.size() << " instructions. Now waiting for memory." << endl;
-
         }
+
+
         else if (command.rfind("screen -r ", 0) == 0) {
             if (inScreen) {
                 cout << "Already in a screen. Type 'exit' first." << endl;
@@ -2110,12 +2470,14 @@ int main() {
                 continue;
             }
 
+            // Lock mutexes in consistent order
             {
-                scoped_lock lock(processMutex, waiting_queue_mutex, queue_mutex, memory_mutex, screensMutex);
+                lock_guard<mutex> start_lock(processMutex); // Changed from proc_lock
+                lock_guard<mutex> screen_lock(screensMutex);
+                lock_guard<mutex> wait_lock(waiting_queue_mutex);
+                lock_guard<mutex> queue_lock(queue_mutex);
+                lock_guard<mutex> mem_lock(memory_mutex);
 
-
-
-                // globalProcesses.clear(); REMOVED since it restarts processes
                 screens.clear();
                 while (!waiting_for_memory_queue.empty()) waiting_for_memory_queue.pop();
                 while (!ready_queue.empty()) ready_queue.pop();
@@ -2123,28 +2485,39 @@ int main() {
 
                 if (globalProcesses.empty()) {
                     // Generate 10 processes with randomized instructions
-                    
+
                     for (int i = 1; i <= 10; ++i) {
                         stringstream name;
                         name << "process" << setfill('0') << setw(2) << i;
 
                         // Calculate a random, power-of-2 memory size
-                        int min_exp = log2(systemConfig.min_mem_per_proc);
-                        int max_exp = log2(systemConfig.max_mem_per_proc);
+                        int min_exp = static_cast<int>(log2(systemConfig.min_mem_per_proc));
+                        int max_exp = static_cast<int>(log2(systemConfig.max_mem_per_proc));
                         int rand_exp = min_exp + (rand() % (max_exp - min_exp + 1));
-                        int random_mem_size = pow(2, rand_exp);
+                        int random_mem_size = static_cast<int>(pow(2, rand_exp));
 
-                        // === [MODIFIED] === Use new Process constructor
-                        Process newProc(name.str(), random_mem_size);
-                        newProc.instructions = generateProcessInstructions(systemConfig.min_ins, systemConfig.max_ins);
+                        // === [FIXED] === Assign a proper PID to the new process
+                        int pid = nextPID++;
+                        Process newProc(name.str(), random_mem_size, pid);
+                        newProc.instructions = generateProcessInstructions(systemConfig.min_ins, systemConfig.max_ins, random_mem_size);
                         newProc.totalTasks = countTotalInstructions(newProc.instructions);
                         newProc.currentInstructionIndex = 0;
 
+                        // === [FIXED] === Initialize the Page Table for the new process
+                        int numPages = random_mem_size / systemConfig.mem_per_frame;
+                        for (int vpn = 0; vpn < numPages; ++vpn) {
+                            PageTableEntry entry;
+                            entry.virtualPageNumber = vpn;
+                            entry.valid = false; // Page not yet in memory
+                            entry.frameNumber = -1;
+                            entry.dirty = false;
+                            entry.referenced = false;
+                            newProc.pageTable[vpn] = entry;
+                        }
+
                         globalProcesses.push_back(std::move(newProc));
                     }
-                    
                 }
-                
 
                 // Add all new processes to the waiting queue
                 for (auto& proc : globalProcesses) {
@@ -2185,8 +2558,9 @@ int main() {
             generateUtilizationReport();
         }
         else if (command == "vmstat") {
-            printVMStat();
+            printEnhancedVMStat();
         }
+        
         else if (!command.empty()) {
             if (inScreen) {
                 // This just advances the UI
@@ -2198,6 +2572,7 @@ int main() {
                 cout << "Command not recognized." << endl;
             }
         }
+
     }
 
     return 0;
