@@ -2049,7 +2049,7 @@ int main() {
 
                 if (globalProcesses.empty()) {
                     // Generate 10 processes with randomized instructions
-                    /*
+                    
                     for (int i = 1; i <= 10; ++i) {
                         stringstream name;
                         name << "process" << setfill('0') << setw(2) << i;
@@ -2062,7 +2062,7 @@ int main() {
 
                         globalProcesses.push_back(std::move(newProc));
                     }
-                    */
+                    
                 }
                 
 
