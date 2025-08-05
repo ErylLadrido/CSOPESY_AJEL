@@ -4,6 +4,12 @@
         "ostream": "cpp",
         "mutex": "cpp",
         "sstream": "cpp",
-        "thread": "cpp"
+        "thread": "cpp",
+        "vector": "cpp",
+        "fstream": "cpp",
+        "iostream": "cpp",
+        "string": "cpp",
+        "queue": "cpp",
+        "ios": "cpp"
     }
 }

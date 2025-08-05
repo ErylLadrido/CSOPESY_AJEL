@@ -29,7 +29,7 @@
 #include <cstdint> // For uint16_t
 #include <atomic> // For VMStat
 #include <regex> // For backing store
-
+#include <cmath>
 
 // ===================== Libraries - END ===================== //
 
@@ -435,6 +435,9 @@ int assignFrameToPage(Process& process, int virtualPageNumber, int frameIndex) {
     int baseAddr = virtualPageNumber * systemConfig.mem_per_frame;
     loadPageFromBackingStore(process.pid, virtualPageNumber, process.memory_space, baseAddr);
 
+    // Increment memory count
+    current_memory_used += systemConfig.mem_per_frame;
+
     return frameIndex;
 }
 
@@ -455,6 +458,11 @@ int evictFrame() {
         }
 
         FrameInfo& evicted = frameTable[evictedFrame];
+
+        if (evicted.ownerPID == -1) {
+            continue;
+        }
+
         int evictedPID = evicted.ownerPID;
         int evictedVPN = evicted.virtualPageNumber;
 
@@ -468,6 +476,7 @@ int evictFrame() {
             if (evicted.dirty) {
                 int baseAddr = evictedVPN * systemConfig.mem_per_frame;
                 savePageToBackingStore(evictedProcess.pid, evictedVPN, evictedProcess.memory_space, baseAddr);
+                pageReplacements++;
             }
 
             // Invalidate the page in the page table
@@ -483,6 +492,7 @@ int evictFrame() {
         evicted.dirty = false;
         evicted.referenced = false;
 
+        current_memory_used -= systemConfig.mem_per_frame;
         return evictedFrame;
     }
 
